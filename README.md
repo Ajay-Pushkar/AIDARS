@@ -1,6 +1,4 @@
-# AIDARS
-
-AI Driven Adaptive Render and Asset Distribution System.
+# AIDARS (AI Driven Adaptive Render and Asset Distribution System)
 
 ## Goal
 
