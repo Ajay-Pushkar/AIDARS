@@ -6,12 +6,14 @@ from typing import Any, Dict, List, Optional
 from .models import (
     AnimationCurveInfo,
     AnimationInfo,
+    BoneInfo,
     CollectionInfo,
     ConstraintInfo,
     KeyframeInfo,
     MaterialInfo,
     MeshInfo,
     ModifierInfo,
+    ParticleSystemInfo,
     RelationshipInfo,
     SceneMetadata,
     SceneObject,
@@ -126,10 +128,20 @@ class SceneIntelligenceEngine:
                     vertex_count=int(mesh_payload.get("vertex_count", 0)),
                     face_count=int(mesh_payload.get("face_count", 0)),
                     edge_count=int(mesh_payload.get("edge_count", 0)),
+                    triangle_count=int(mesh_payload.get("triangle_count", 0)),
+                    uv_map_count=int(mesh_payload.get("uv_map_count", 0)),
+                    vertex_group_count=int(mesh_payload.get("vertex_group_count", 0)),
+                    has_normals=bool(mesh_payload.get("has_normals", True)),
                 )
 
             materials = [
-                MaterialInfo(name=str(material.get("name", "")), shader=str(material.get("shader", "")))
+                MaterialInfo(
+                    name=str(material.get("name", "")),
+                    shader=str(material.get("shader", "")),
+                    node_tree=str(material.get("node_tree", "")),
+                    image_textures=[str(texture) for texture in material.get("image_textures", []) if texture is not None],
+                    settings=dict(material.get("settings", {})) if isinstance(material.get("settings"), dict) else {},
+                )
                 for material in item.get("materials", [])
                 if isinstance(material, dict)
             ]
@@ -179,6 +191,7 @@ class SceneIntelligenceEngine:
                             data_path=str(curve_payload.get("data_path", "")),
                             array_index=int(curve_payload.get("array_index", -1)),
                             keyframes=keyframes,
+                            interpolation=str(curve_payload.get("interpolation", "")),
                         )
                     )
                 animation = AnimationInfo(
@@ -187,6 +200,16 @@ class SceneIntelligenceEngine:
                     curves=curves,
                 )
 
+            bones = [
+                BoneInfo(name=str(bone.get("name", "")), parent=str(bone.get("parent")) if bone.get("parent") is not None else None)
+                for bone in item.get("bones", [])
+                if isinstance(bone, dict)
+            ]
+            particle_systems = [
+                ParticleSystemInfo(name=str(system.get("name", "")), count=int(system.get("count", 0)))
+                for system in item.get("particle_systems", [])
+                if isinstance(system, dict)
+            ]
             child_ids = [str(child_id) for child_id in item.get("children", []) if child_id is not None]
             objects.append(
                 SceneObject(
@@ -205,6 +228,8 @@ class SceneIntelligenceEngine:
                     modifiers=modifiers,
                     constraints=constraints,
                     animation=animation,
+                    bones=bones,
+                    particle_systems=particle_systems,
                     camera=item.get("camera") if isinstance(item.get("camera"), dict) else None,
                     raw=item,
                 )

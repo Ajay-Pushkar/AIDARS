@@ -1,0 +1,70 @@
+﻿{
+    "objects":  [
+                    {
+                        "visibility":  {
+                                           "hide_render":  false,
+                                           "hide_viewport":  false
+                                       },
+                        "collection":  "col-main",
+                        "id":  "obj-1",
+                        "type":  "MESH",
+                        "parent":  null,
+                        "modifiers":  [
+
+                                      ],
+                        "materials":  [
+                                          {
+                                              "name":  "Mat",
+                                              "shader":  "Principled"
+                                          }
+                                      ],
+                        "name":  "Cube",
+                        "children":  [
+
+                                     ],
+                        "animation":  {
+                                          "curves":  [
+
+                                                     ],
+                                          "is_animated":  false,
+                                          "fcurves":  0
+                                      },
+                        "mesh":  {
+                                     "name":  "CubeMesh",
+                                     "face_count":  12,
+                                     "vertex_count":  8
+                                 },
+                        "constraints":  [
+
+                                        ]
+                    }
+                ],
+    "lights":  [
+
+               ],
+    "metadata":  {
+                     "frame_end":  24,
+                     "frame_start":  1,
+                     "name":  "Demo",
+                     "fps":  24
+                 },
+    "images":  [
+
+               ],
+    "collections":  [
+                        {
+                            "parent":  null,
+                            "name":  "Main",
+                            "id":  "col-main"
+                        }
+                    ],
+    "materials":  [
+                      {
+                          "name":  "Mat",
+                          "shader":  "Principled"
+                      }
+                  ],
+    "textures":  [
+
+                 ]
+}

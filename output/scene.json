@@ -1,0 +1,87 @@
+{
+  "collections": [
+    {
+      "id": "col-1",
+      "name": "Characters",
+      "parent": null
+    }
+  ],
+  "images": [],
+  "lights": [],
+  "materials": [
+    {
+      "name": "MatRed",
+      "shader": "Principled BSDF"
+    }
+  ],
+  "metadata": {
+    "fps": 24.0,
+    "frame_end": 24,
+    "frame_start": 1,
+    "name": "Fixture Scene",
+    "render_engine": "",
+    "units": ""
+  },
+  "objects": [
+    {
+      "animation": {
+        "curves": [],
+        "fcurves": 0,
+        "is_animated": false
+      },
+      "bones": [],
+      "camera": null,
+      "children": [],
+      "collection": "col-1",
+      "constraints": [],
+      "id": "obj-1",
+      "materials": [
+        {
+          "image_textures": [],
+          "name": "MatRed",
+          "node_tree": "",
+          "settings": {},
+          "shader": "Principled BSDF"
+        }
+      ],
+      "mesh": {
+        "edge_count": 0,
+        "face_count": 12,
+        "has_normals": true,
+        "name": "CubeMesh",
+        "triangle_count": 0,
+        "uv_map_count": 0,
+        "vertex_count": 8,
+        "vertex_group_count": 0
+      },
+      "modifiers": [],
+      "name": "Cube",
+      "parent": null,
+      "particle_systems": [],
+      "type": "MESH",
+      "visibility": {
+        "hide_render": false,
+        "hide_viewport": false
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "relationship": "collection",
+      "source": "obj-1",
+      "target": "col-1"
+    }
+  ],
+  "statistics": {
+    "animated_object_count": 0,
+    "camera_count": 0,
+    "collection_count": 1,
+    "image_count": 0,
+    "light_count": 0,
+    "material_count": 1,
+    "object_count": 1,
+    "texture_count": 0,
+    "visible_object_count": 1
+  },
+  "textures": []
+}

@@ -63,9 +63,19 @@ class JsonSceneExporter:
                         "vertex_count": obj.mesh.vertex_count if obj.mesh else 0,
                         "face_count": obj.mesh.face_count if obj.mesh else 0,
                         "edge_count": obj.mesh.edge_count if obj.mesh else 0,
+                        "triangle_count": obj.mesh.triangle_count if obj.mesh else 0,
+                        "uv_map_count": obj.mesh.uv_map_count if obj.mesh else 0,
+                        "vertex_group_count": obj.mesh.vertex_group_count if obj.mesh else 0,
+                        "has_normals": obj.mesh.has_normals if obj.mesh else True,
                     },
                     "materials": [
-                        {"name": material.name, "shader": material.shader}
+                        {
+                            "name": material.name,
+                            "shader": material.shader,
+                            "node_tree": material.node_tree,
+                            "image_textures": material.image_textures,
+                            "settings": material.settings,
+                        }
                         for material in obj.materials
                     ],
                     "modifiers": [
@@ -105,12 +115,18 @@ class JsonSceneExporter:
                                     }
                                     for keyframe in curve.keyframes
                                 ],
+                                "interpolation": curve.interpolation,
                             }
                             for curve in obj.animation.curves
                         ] if obj.animation else [],
                     },
                     "camera": obj.camera,
                     "children": obj.children,
+                    "bones": [{"name": bone.name, "parent": bone.parent} for bone in obj.bones],
+                    "particle_systems": [
+                        {"name": system.name, "count": system.count}
+                        for system in obj.particle_systems
+                    ],
                 }
                 for obj in snapshot.objects
             ],

@@ -1,0 +1,32 @@
+{
+  "metadata": {
+    "name": "Fixture Scene",
+    "frame_start": 1,
+    "frame_end": 24,
+    "fps": 24
+  },
+  "collections": [
+    {"name": "Characters", "id": "col-1", "parent": null}
+  ],
+  "objects": [
+    {
+      "name": "Cube",
+      "id": "obj-1",
+      "type": "MESH",
+      "collection": "col-1",
+      "parent": null,
+      "children": [],
+      "visibility": {"hide_render": false, "hide_viewport": false},
+      "mesh": {"name": "CubeMesh", "vertex_count": 8, "face_count": 12},
+      "materials": [{"name": "MatRed", "shader": "Principled BSDF"}],
+      "modifiers": [],
+      "constraints": [],
+      "animation": {"fcurves": 0, "is_animated": false, "curves": []},
+      "referenced_assets": ["/assets/chair.blend"]
+    }
+  ],
+  "lights": [],
+  "materials": [{"name": "MatRed", "shader": "Principled BSDF"}],
+  "textures": [],
+  "images": []
+}

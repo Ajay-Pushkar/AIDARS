@@ -32,6 +32,10 @@ class MeshInfo:
     vertex_count: int = 0
     face_count: int = 0
     edge_count: int = 0
+    triangle_count: int = 0
+    uv_map_count: int = 0
+    vertex_group_count: int = 0
+    has_normals: bool = True
 
 
 @dataclass(slots=True)
@@ -40,6 +44,9 @@ class MaterialInfo:
 
     name: str = ""
     shader: str = ""
+    node_tree: str = ""
+    image_textures: List[str] = field(default_factory=list)
+    settings: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -82,6 +89,23 @@ class AnimationCurveInfo:
     data_path: str = ""
     array_index: int = -1
     keyframes: List[KeyframeInfo] = field(default_factory=list)
+    interpolation: str = ""
+
+
+@dataclass(slots=True)
+class BoneInfo:
+    """A single armature bone."""
+
+    name: str = ""
+    parent: Optional[str] = None
+
+
+@dataclass(slots=True)
+class ParticleSystemInfo:
+    """A particle system attached to an object."""
+
+    name: str = ""
+    count: int = 0
 
 
 @dataclass(slots=True)
@@ -109,6 +133,8 @@ class SceneObject:
     modifiers: List[ModifierInfo] = field(default_factory=list)
     constraints: List[ConstraintInfo] = field(default_factory=list)
     animation: Optional[AnimationInfo] = None
+    bones: List[BoneInfo] = field(default_factory=list)
+    particle_systems: List[ParticleSystemInfo] = field(default_factory=list)
     camera: Optional[Dict[str, Any]] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
