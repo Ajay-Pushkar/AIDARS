@@ -109,6 +109,41 @@ class SceneIntelligenceEngineTests(unittest.TestCase):
         self.assertEqual(snapshot.objects[0].animation.curves[0].keyframes[0].frame, 1)
         self.assertEqual(snapshot.relationships[0].relationship, "parent")
 
+    def test_analyze_scene_data_extracts_transform_details(self) -> None:
+        snapshot = self.engine.analyze_scene_data(
+            {
+                "metadata": {"name": "Transform Scene", "frame_start": 1, "frame_end": 24, "fps": 24},
+                "collections": [],
+                "objects": [
+                    {
+                        "name": "Cube",
+                        "id": "obj-1",
+                        "type": "MESH",
+                        "collection": None,
+                        "parent": None,
+                        "children": [],
+                        "visibility": {"hide_render": False, "hide_viewport": False},
+                        "transform": {
+                            "location": [1.0, 2.0, 3.0],
+                            "rotation_euler": [0.1, 0.2, 0.3],
+                            "rotation_quaternion": [0.0, 0.0, 0.0, 1.0],
+                            "scale": [2.0, 2.0, 2.0],
+                        },
+                        "mesh": {"name": "CubeMesh", "vertex_count": 8, "face_count": 12},
+                    }
+                ],
+                "lights": [],
+                "materials": [],
+                "textures": [],
+                "images": [],
+            }
+        )
+
+        self.assertEqual(snapshot.objects[0].transform.location, [1.0, 2.0, 3.0])
+        self.assertEqual(snapshot.objects[0].transform.rotation_euler, [0.1, 0.2, 0.3])
+        self.assertEqual(snapshot.objects[0].transform.rotation_quaternion, [0.0, 0.0, 0.0, 1.0])
+        self.assertEqual(snapshot.objects[0].transform.scale, [2.0, 2.0, 2.0])
+
     def test_exporter_writes_json_file(self) -> None:
         snapshot = self.engine.analyze_scene_data(self.scene_data)
 
@@ -177,8 +212,8 @@ class SceneIntelligenceEngineTests(unittest.TestCase):
             )
             payload = adapter.load_scene(blend_path)
 
-        self.assertEqual(payload["metadata"]["name"], "external")
-        self.assertEqual(payload["metadata"]["frame_end"], 120)
+        self.assertEqual(payload.metadata.name, "external")
+        self.assertEqual(payload.metadata.frame_end, 120)
 
     def test_blender_adapter_falls_back_to_placeholder_payload(self) -> None:
         adapter = BlenderAdapter(blender_module="missing_module_for_test")
@@ -187,8 +222,8 @@ class SceneIntelligenceEngineTests(unittest.TestCase):
             blend_path.write_text("placeholder", encoding="utf-8")
             payload = adapter.load_scene(blend_path)
 
-        self.assertEqual(payload["metadata"]["name"], "example")
-        self.assertEqual(payload["metadata"]["frame_end"], 250)
+        self.assertEqual(payload.metadata.name, "example")
+        self.assertEqual(payload.metadata.frame_end, 250)
 
 
 if __name__ == "__main__":

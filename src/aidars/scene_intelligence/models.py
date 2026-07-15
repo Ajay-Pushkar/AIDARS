@@ -39,6 +39,16 @@ class MeshInfo:
 
 
 @dataclass(slots=True)
+class TransformInfo:
+    """Object transforms such as location, rotation, and scale."""
+
+    location: List[float] = field(default_factory=list)
+    rotation_euler: List[float] = field(default_factory=list)
+    rotation_quaternion: List[float] = field(default_factory=list)
+    scale: List[float] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class MaterialInfo:
     """Material data extracted from a Blender object."""
 
@@ -135,6 +145,7 @@ class SceneObject:
     animation: Optional[AnimationInfo] = None
     bones: List[BoneInfo] = field(default_factory=list)
     particle_systems: List[ParticleSystemInfo] = field(default_factory=list)
+    transform: Optional[TransformInfo] = None
     camera: Optional[Dict[str, Any]] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
@@ -171,6 +182,20 @@ class RelationshipInfo:
     source: str
     target: str
     relationship: str
+
+
+@dataclass(slots=True)
+class SceneData:
+    """A structured scene payload produced by the adapter before normalization."""
+
+    metadata: SceneMetadata
+    collections: List[CollectionInfo] = field(default_factory=list)
+    objects: List[SceneObject] = field(default_factory=list)
+    lights: List[Dict[str, Any]] = field(default_factory=list)
+    materials: List[MaterialInfo] = field(default_factory=list)
+    textures: List[Dict[str, Any]] = field(default_factory=list)
+    images: List[Dict[str, Any]] = field(default_factory=list)
+    raw: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

@@ -1,7 +1,6 @@
 """Scene intelligence engine package."""
 
-from .adapters import BlenderAdapter
-from .blender_adapter import BlenderAdapter as RealBlenderAdapter
+from .blender_adapter import BlenderAdapter
 from .dependency_graph import DependencyGraph, DependencyGraphBuilder, GraphEdge, GraphNode
 from .engine import SceneIntelligenceEngine
 from .exporters import JsonSceneExporter

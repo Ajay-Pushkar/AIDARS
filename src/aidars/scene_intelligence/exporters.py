@@ -127,6 +127,12 @@ class JsonSceneExporter:
                         {"name": system.name, "count": system.count}
                         for system in obj.particle_systems
                     ],
+                    "transform": {
+                        "location": obj.transform.location if obj.transform else [],
+                        "rotation_euler": obj.transform.rotation_euler if obj.transform else [],
+                        "rotation_quaternion": obj.transform.rotation_quaternion if obj.transform else [],
+                        "scale": obj.transform.scale if obj.transform else [],
+                    },
                 }
                 for obj in snapshot.objects
             ],

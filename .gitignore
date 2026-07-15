@@ -8,3 +8,6 @@ __pycache__/
 .vscode/
 *.egg-info/
 output/
+.venv/
+venv/
+env/

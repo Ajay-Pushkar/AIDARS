@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from .engine import SceneIntelligenceEngine
-from .models import SceneSnapshot
+from .models import SceneData, SceneSnapshot
 
 
 class SceneScanner:
@@ -17,7 +17,7 @@ class SceneScanner:
     def __init__(self, engine: Optional[SceneIntelligenceEngine] = None) -> None:
         self.engine = engine or SceneIntelligenceEngine()
 
-    def scan(self, scene_data: dict[str, Any]) -> SceneSnapshot:
+    def scan(self, scene_data: dict[str, Any] | SceneData) -> SceneSnapshot:
         """Scan a scene payload and return a scene snapshot."""
 
         return self.engine.analyze_scene_data(scene_data)

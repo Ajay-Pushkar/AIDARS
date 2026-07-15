@@ -7,6 +7,9 @@ import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
+from .builders import CollectionBuilder, MaterialBuilder, MetadataBuilder, ObjectBuilder
+from .models import SceneData
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,7 +27,7 @@ class BlenderAdapter:
         self.blender_executable = str(blender_executable).strip() if blender_executable else None
         self.logger = logger
 
-    def load_scene(self, source: str | Path) -> dict[str, Any]:
+    def load_scene(self, source: str | Path) -> SceneData:
         """Load a Blender scene from a .blend file path.
 
         When Blender's Python API is available in the runtime, this method will
@@ -47,15 +50,15 @@ class BlenderAdapter:
             module = importlib.import_module(self.blender_module)
         except ImportError:
             self.logger.warning("Blender API module is unavailable; using fallback payload")
-            return self._fallback_payload(path)
+            return self._fallback_scene_data(path)
 
         if not hasattr(module, "context"):
             self.logger.warning("Blender API module is present but not usable; using fallback payload")
-            return self._fallback_payload(path)
+            return self._fallback_scene_data(path)
 
         return self._inspect_with_blender(module, path)
 
-    def _inspect_with_external_blender(self, blend_path: Path) -> dict[str, Any]:
+    def _inspect_with_external_blender(self, blend_path: Path) -> SceneData:
         """Use an external Blender executable to inspect a .blend file.
 
         The adapter passes a small inspection script to Blender's Python runtime
@@ -79,6 +82,12 @@ for obj in scene.objects:
         'visibility': {
             'hide_render': obj.hide_render,
             'hide_viewport': obj.hide_viewport,
+        },
+        'transform': {
+            'location': list(obj.location),
+            'rotation_euler': list(obj.rotation_euler),
+            'rotation_quaternion': list(obj.rotation_quaternion),
+            'scale': list(obj.scale),
         },
         'mesh': {
             'name': obj.data.name if getattr(obj, 'data', None) else '',
@@ -138,7 +147,7 @@ print(json.dumps(payload))
         if not isinstance(payload, dict):
             raise RuntimeError("external Blender returned a non-object payload")
 
-        return payload
+        return self._build_scene_data(payload)
 
     def _build_external_blender_command(self, blend_path: Path, inspection_script: str) -> list[str]:
         """Build a subprocess command for an external Blender executable."""
@@ -154,7 +163,7 @@ print(json.dumps(payload))
 
         return [str(executable), "--background", str(blend_path), "--python-expr", inspection_script]
 
-    def _inspect_with_blender(self, bpy_module: Any, blend_path: Path) -> dict[str, Any]:
+    def _inspect_with_blender(self, bpy_module: Any, blend_path: Path) -> SceneData:
         """Inspect a Blender scene using Blender's Python API.
 
         This method is intentionally conservative. It will attempt to open the
@@ -182,6 +191,12 @@ print(json.dumps(payload))
                         "hide_render": obj.hide_render,
                         "hide_viewport": obj.hide_viewport,
                     },
+                    "transform": {
+                        "location": list(obj.location),
+                        "rotation_euler": list(obj.rotation_euler),
+                        "rotation_quaternion": list(obj.rotation_quaternion),
+                        "scale": list(obj.scale),
+                    },
                     "mesh": {
                         "name": obj.data.name if getattr(obj, "data", None) else "",
                         "vertex_count": len(obj.data.vertices) if getattr(obj, "data", None) and hasattr(obj.data, "vertices") else 0,
@@ -199,7 +214,7 @@ print(json.dumps(payload))
                 }
             )
 
-        return {
+        payload = {
             "metadata": {
                 "name": scene.name,
                 "frame_start": scene.frame_start,
@@ -222,11 +237,12 @@ print(json.dumps(payload))
             "textures": [],
             "images": [],
         }
+        return self._build_scene_data(payload)
 
-    def _fallback_payload(self, blend_path: Path) -> dict[str, Any]:
+    def _fallback_scene_data(self, blend_path: Path) -> SceneData:
         """Provide a deterministic placeholder payload for non-Blender runs."""
 
-        return {
+        payload = {
             "metadata": {
                 "name": blend_path.stem,
                 "frame_start": 1,
@@ -242,3 +258,20 @@ print(json.dumps(payload))
             "textures": [],
             "images": [],
         }
+        return self._build_scene_data(payload)
+
+    def _build_scene_data(self, payload: dict[str, Any]) -> SceneData:
+        metadata_builder = MetadataBuilder()
+        collection_builder = CollectionBuilder()
+        object_builder = ObjectBuilder()
+        material_builder = MaterialBuilder()
+        return SceneData(
+            metadata=metadata_builder.build(payload.get("metadata", {})),
+            collections=collection_builder.build(payload.get("collections", [])),
+            objects=object_builder.build(payload.get("objects", [])),
+            lights=list(payload.get("lights", [])),
+            materials=material_builder.build(payload.get("materials", [])),
+            textures=list(payload.get("textures", [])),
+            images=list(payload.get("images", [])),
+            raw=payload,
+        )
