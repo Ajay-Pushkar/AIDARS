@@ -1,0 +1,11 @@
+from typing import Final
+
+AIDARS_NAME: Final = "AIDARS"
+
+PAYLOAD_SCHEMA_VERSION: Final = "1.0"
+
+DEFAULT_FRAME_START: Final = 1
+
+DEFAULT_FRAME_END: Final = 250
+
+DEFAULT_FPS: Final = 24

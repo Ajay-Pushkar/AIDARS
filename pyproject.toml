@@ -18,3 +18,12 @@ where = ["src"]
 
 [project.scripts]
 aidars-scene = "aidars.scene_intelligence.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "black",
+    "mypy",
+    "fake-bpy-module-4.5==20260128",
+]
