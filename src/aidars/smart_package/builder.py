@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
+
+from .optimizer import AssetOptimizer
+
+if TYPE_CHECKING:
+    from aidars.scene_intelligence.dependency_graph import DependencyGraph
 
 
 @dataclass(slots=True)
@@ -70,6 +76,44 @@ class SmartPackageBuilder:
             return True
         return not (asset.frame_end < frame_start or asset.frame_start > frame_end)
 
+    def build_optimized_package(
+        self,
+        frame_start: int,
+        frame_end: int,
+        assets: List[PackageAsset],
+        graph: "DependencyGraph",
+        visible_object_ids: Set[str],
+    ) -> PackageManifest:
+        """Build a package manifest pruned to only visibility-reachable assets.
+
+            Dependency Graph -> Visibility Analysis -> Asset Optimizer -> Package Manifest
+
+        This is ``build_package`` plus one extra step: before frame-range
+        selection, assets that no visible object's dependency chain reaches
+        are dropped. See ``aidars.smart_package.optimizer`` for exactly
+        what "reachable" covers today (externally-referenced assets only;
+        materials/textures aren't individually prunable yet since
+        PackageAsset has no per-material granularity).
+
+        Args:
+            frame_start: First frame in the requested range.
+            frame_end: Last frame in the requested range.
+            assets: Candidate assets for the package.
+            graph: A built dependency graph for the scene.
+            visible_object_ids: Object ids visible in [frame_start, frame_end]
+                (see ``aidars.visibility.engine.VisibilityAnalyzer``).
+
+        Returns:
+            A manifest describing the (pruned) package contents, with
+            optimization stats recorded in ``manifest.metadata``.
+        """
+        optimization = AssetOptimizer().optimize(graph, visible_object_ids, assets)
+        manifest = self.build_package(frame_start, frame_end, optimization.kept_assets)
+        manifest.metadata["visibility_pruned_asset_count"] = len(optimization.pruned_assets)
+        manifest.metadata["visibility_pruned_size_bytes"] = optimization.pruned_size_bytes
+        manifest.metadata["visible_object_count"] = optimization.visible_object_count
+        return manifest
+
     def _build_package_id(self, frame_start: int, frame_end: int) -> str:
         return f"pkg-{frame_start}-{frame_end}"
 
@@ -88,5 +132,5 @@ class SmartPackageBuilder:
             ],
             "metadata": manifest.metadata,
         }
-        path.write_text(__import__("json").dumps(payload, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path

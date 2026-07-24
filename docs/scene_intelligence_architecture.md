@@ -6,6 +6,16 @@ The Scene Intelligence Engine is the foundational module of AIDARS. Its responsi
 
 This phase does not implement artificial intelligence, distributed execution, or asset packaging. It focuses exclusively on understanding a scene.
 
+> **Status update:** dependency graph generation (`dependency_graph.py`) and a
+> first cut of smart packaging (`smart_package/builder.py`) have since been
+> implemented and wired into the CLI ahead of the original phase boundary
+> described above. They're intentionally minimal (frame-range asset
+> selection; no compression/pruning yet) and don't change this document's
+> account of the *engine* layer itself, which remains accurate.
+> Orchestration of all of this - including dependency graph construction,
+> which used to happen directly in the CLI - has since moved into a
+> dedicated `SceneEngine` facade; see `docs/scene_engine_architecture.md`.
+
 ## 2. Architecture
 
 The architecture follows a clean separation of concerns:

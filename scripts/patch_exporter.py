@@ -1,37 +1,11 @@
-from __future__ import annotations
-
-import json
+import re
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
 
-from .models import SceneSnapshot
-
-if TYPE_CHECKING:
-    from .dependency_graph import DependencyGraph
-
-
-class JsonSceneExporter:
-    """Exports a normalized scene snapshot to JSON."""
-
-    @staticmethod
-    def write_json(snapshot: SceneSnapshot, output_path: str | Path) -> Path:
-        """Write the snapshot to disk as pretty-printed JSON.
-
-        Args:
-            snapshot: A scene snapshot to serialize.
-            output_path: Destination file path.
-
-        Returns:
-            The resolved output path.
-        """
-        path = Path(output_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        payload = JsonSceneExporter._to_serializable(snapshot)
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        return path
-
-    @staticmethod
+def patch_exporter():
+    file_path = Path(r"C:\Users\kurap\.gemini\antigravity\scratch\extracted_files\AIDAR_project\AIDAR\src\aidars\scene_intelligence\exporters.py")
+    content = file_path.read_text(encoding="utf-8")
+    
+    new_method = '''    @staticmethod
     def _to_serializable(snapshot: SceneSnapshot) -> dict[str, Any]:
         meshes = []
         cameras = []
@@ -183,51 +157,18 @@ class JsonSceneExporter:
                     for rel in snapshot.relationships
                 ]
             }
-        }
+        }'''
+    
+    # We will replace from "    @staticmethod\n    def _to_serializable" up to the end of the method body before "class DependencyGraphExporter:"
+    
+    pattern = re.compile(r'    @staticmethod\n    def _to_serializable\(snapshot: SceneSnapshot\) -> dict\[str, Any\]:.*?(?=    @staticmethod|class DependencyGraphExporter:)', re.DOTALL)
+    
+    new_content, count = pattern.subn(new_method + "\n\n\n", content, count=1)
+    if count == 1:
+        file_path.write_text(new_content, encoding="utf-8")
+        print("Successfully patched exporters.py")
+    else:
+        print("Failed to find pattern in exporters.py")
 
-
-class DependencyGraphExporter:
-    """Exports a dependency graph, plus an asset-integrity report, to JSON.
-
-    This is the "JSON Report" deliverable at the end of the documented
-    pipeline: .blend -> Scene Scanner -> Dependency Graph -> JSON Report.
-    """
-
-    @staticmethod
-    def write_json(graph: "DependencyGraph", output_path: str | Path) -> Path:
-        """Write the dependency graph and integrity report to disk.
-
-        Args:
-            graph: A built dependency graph.
-            output_path: Destination file path.
-
-        Returns:
-            The resolved output path.
-        """
-        path = Path(output_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = DependencyGraphExporter.to_dict(graph)
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        return path
-
-    @staticmethod
-    def to_dict(graph: "DependencyGraph") -> dict[str, Any]:
-        """Convert a dependency graph into a JSON-serializable dictionary."""
-        from .integrity import IntegrityChecker
-
-        integrity = IntegrityChecker().check(graph)
-        return {
-            "nodes": [
-                {"id": node.identifier, "label": node.label, "kind": node.kind}
-                for node in graph.nodes
-            ],
-            "edges": [
-                {"source": edge.source, "target": edge.target, "relationship": edge.relationship}
-                for edge in graph.edges
-            ],
-            "statistics": {
-                "node_count": len(graph.nodes),
-                "edge_count": len(graph.edges),
-            },
-            "integrity": integrity.to_dict(),
-        }
+if __name__ == "__main__":
+    patch_exporter()

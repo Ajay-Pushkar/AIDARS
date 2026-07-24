@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Sequence
 
 from .models import (
     AnimationCurveInfo,
@@ -181,6 +181,9 @@ class ObjectBuilder:
                     scale=self._coerce_float_list(transform_payload.get("scale")),
                 )
             child_ids = [str(child_id) for child_id in item.get("children", []) if child_id is not None]
+            referenced_assets = [
+                str(asset) for asset in item.get("referenced_assets", []) if asset is not None
+            ]
             objects.append(
                 SceneObject(
                     name=str(item.get("name", "")),
@@ -202,6 +205,7 @@ class ObjectBuilder:
                     particle_systems=particle_systems,
                     transform=transform,
                     camera=item.get("camera") if isinstance(item.get("camera"), dict) else None,
+                    referenced_assets=referenced_assets,
                     raw=item,
                 )
             )
@@ -224,7 +228,19 @@ class MaterialBuilder:
                 continue
             if not isinstance(item, dict):
                 raise TypeError("each material entry must be a dictionary")
-            materials.append(MaterialInfo(name=str(item.get("name", "")), shader=str(item.get("shader", ""))))
+            materials.append(
+                MaterialInfo(
+                    name=str(item.get("name", "")),
+                    shader=str(item.get("shader", "")),
+                    node_tree=str(item.get("node_tree", "")),
+                    image_textures=[
+                        str(texture)
+                        for texture in item.get("image_textures", [])
+                        if texture is not None
+                    ],
+                    settings=dict(item.get("settings", {})) if isinstance(item.get("settings"), dict) else {},
+                )
+            )
         return materials
 
 

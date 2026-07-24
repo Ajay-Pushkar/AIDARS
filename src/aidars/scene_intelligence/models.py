@@ -147,6 +147,7 @@ class SceneObject:
     particle_systems: List[ParticleSystemInfo] = field(default_factory=list)
     transform: Optional[TransformInfo] = None
     camera: Optional[Dict[str, Any]] = None
+    referenced_assets: List[str] = field(default_factory=list)
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
