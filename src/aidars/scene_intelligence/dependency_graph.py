@@ -112,6 +112,11 @@ class DependencyGraphBuilder:
                 if constraint.target:
                     add_edge(obj.id, constraint.target, "constraint")
 
+            for modifier in obj.modifiers:
+                modifier_id = f"modifier:{obj.id}:{modifier.name}"
+                add_node(modifier_id, modifier.name, "modifier")
+                add_edge(obj.id, modifier_id, "modifier")
+
             for material in obj.materials:
                 material_id = f"material:{material.name}"
                 add_node(material_id, material.name, "material")

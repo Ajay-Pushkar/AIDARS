@@ -1,19 +1,7 @@
 """Scene caching foundation for Phase 2 (caching, incremental scanning, change detection).
 
-This module intentionally does one thing well: given a scene source (a JSON
-payload or a .blend file) and its previously computed content hash, tell the
-caller whether re-analysis can be skipped, and where to find the cached
-outputs if so. It does not decide *when* to invalidate beyond content
-identity - that policy stays in the caller (e.g. the CLI).
-
-Design notes for the next phase increment:
-- Hashing is content-based (sha256), not mtime-based, so moving/copying a
-  .blend file without changing its bytes is still a cache hit, and a hash
-  is stable across machines/timezones.
-- The cache index is a single small JSON file rather than one file per
-  entry, since Phase 2's initial scope is single-machine/single-user; a
-  shared/distributed cache backend can replace SceneCache's storage without
-  changing its public interface.
+This module provides request-aware and content-based caching for scene intelligence
+and downstream pipeline artifacts.
 """
 from __future__ import annotations
 
@@ -30,21 +18,13 @@ _HASH_CHUNK_SIZE = 1024 * 1024  # 1 MiB
 
 
 def hash_json_payload(payload: dict[str, Any]) -> str:
-    """Compute a stable content hash for a JSON-like scene payload.
-
-    Keys are sorted so semantically identical payloads with different key
-    ordering hash identically.
-    """
+    """Compute a stable content hash for a JSON-like scene payload."""
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def hash_blend_file(path: str | Path) -> str:
-    """Compute a stable content hash for a .blend file by streaming its bytes.
-
-    Streams in fixed-size chunks so this stays memory-safe for large scene
-    files instead of reading the whole file into memory at once.
-    """
+    """Compute a stable content hash for a .blend file by streaming its bytes."""
     file_path = Path(path)
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -71,32 +51,24 @@ def hash_source(source: str | Path | dict[str, Any]) -> str:
 
 @dataclass(slots=True)
 class SceneCacheEntry:
-    """A single cache record: what a source hashed to, and where its outputs live."""
+    """A request-aware cache record: content hash, request configuration hash, and outputs."""
 
     source_hash: str
     scene_output: str
+    request_hash: str = ""
     graph_output: Optional[str] = None
+    package_output: Optional[str] = None
+    build_graph: bool = True
+    build_package: bool = False
+    optimize_package_by_visibility: bool = False
+    frame_start: int = 1
+    frame_end: int = 24
+    camera_id: str = ""
     cached_at: float = 0.0
 
 
 class SceneCache:
-    """A small, file-backed cache keyed by scene source content hash.
-
-    Example:
-        cache = SceneCache()
-        source_hash = hash_source(input_path)
-        entry = cache.get(str(input_path))
-        if entry is not None and entry.source_hash == source_hash:
-            # unchanged since last run - skip re-analysis, reuse entry.scene_output
-            ...
-        else:
-            # analyze, then:
-            cache.put(str(input_path), SceneCacheEntry(
-                source_hash=source_hash,
-                scene_output=str(scene_output_path),
-                graph_output=str(graph_output_path),
-            ))
-    """
+    """A file-backed, request-aware cache keyed by scene source and request configuration."""
 
     def __init__(self, cache_dir: str | Path = DEFAULT_CACHE_DIR) -> None:
         self.cache_dir = Path(cache_dir)
@@ -109,8 +81,6 @@ class SceneCache:
             with self.index_path.open("r", encoding="utf-8") as handle:
                 data = json.load(handle)
         except (json.JSONDecodeError, OSError):
-            # A corrupt or unreadable cache is treated as an empty cache
-            # (safe: worst case is redundant work, never stale/wrong output).
             return {}
         return data if isinstance(data, dict) else {}
 
@@ -119,33 +89,71 @@ class SceneCache:
         with self.index_path.open("w", encoding="utf-8") as handle:
             json.dump(index, handle, indent=2)
 
-    def get(self, source_key: str) -> Optional[SceneCacheEntry]:
-        """Look up the most recent cache entry for a source key (e.g. a file path)."""
+    def _make_key(self, source_key: str, request_hash: str = "") -> str:
+        if request_hash:
+            return f"{source_key}::{request_hash}"
+        return source_key
+
+    def get(self, source_key: str | Path, request_hash: str = "", verify_artifacts: bool = False) -> Optional[SceneCacheEntry]:
+        """Look up the cache entry for a source key, verifying request-match and optional disk artifacts."""
+        s_key = str(source_key)
         index = self._load_index()
-        record = index.get(source_key)
+        key = self._make_key(s_key, request_hash)
+        record = index.get(key)
+        if record is None and request_hash:
+            # Fallback to check legacy un-suffixed key ONLY if its request_hash strictly matches
+            fallback = index.get(s_key)
+            if fallback and fallback.get("request_hash") == request_hash:
+                record = fallback
+
         if record is None:
             return None
-        return SceneCacheEntry(**record)
 
-    def put(self, source_key: str, entry: SceneCacheEntry) -> None:
-        """Record (or overwrite) the cache entry for a source key."""
+        valid_fields = set(SceneCacheEntry.__dataclass_fields__)
+        filtered_record = {k: v for k, v in record.items() if k in valid_fields}
+        entry = SceneCacheEntry(**filtered_record)
+
+        if verify_artifacts:
+            if entry.scene_output and not Path(entry.scene_output).exists():
+                return None
+            if entry.build_graph and entry.graph_output and not Path(entry.graph_output).exists():
+                return None
+            if entry.build_package and entry.package_output and not Path(entry.package_output).exists():
+                return None
+
+        return entry
+
+    def put(self, source_key: str | Path, entry: SceneCacheEntry) -> None:
+        """Record (or overwrite) the cache entry for a source key and request configuration."""
+        s_key = str(source_key)
         entry.cached_at = entry.cached_at or time.time()
         index = self._load_index()
-        index[source_key] = asdict(entry)
+
+        # Store keyed by specific request configuration as well as source
+        key = self._make_key(s_key, entry.request_hash)
+        entry_dict = asdict(entry)
+        index[key] = entry_dict
+        index[s_key] = entry_dict
+
         self._write_index(index)
 
-    def has_changed(self, source_key: str, current_hash: str) -> bool:
-        """Return True if the source's content hash differs from what's cached.
+    def has_changed(self, source_key: str | Path, current_hash: str, request_hash: str = "", verify_artifacts: bool = False) -> bool:
+        """Return True if the source's content hash or request hash differs from what's cached."""
+        cached = self.get(source_key, request_hash=request_hash, verify_artifacts=verify_artifacts)
+        if cached is None:
+            return True
+        if cached.source_hash != current_hash:
+            return True
+        if request_hash and cached.request_hash != request_hash:
+            return True
+        return False
 
-        A source that has never been cached counts as changed (nothing to
-        reuse yet).
-        """
-        cached = self.get(source_key)
-        return cached is None or cached.source_hash != current_hash
-
-    def invalidate(self, source_key: str) -> None:
-        """Remove a cache entry, forcing the next lookup to report a change."""
+    def invalidate(self, source_key: str | Path) -> None:
+        """Remove cache entries for a source key."""
+        s_key = str(source_key)
         index = self._load_index()
-        if source_key in index:
-            del index[source_key]
+        keys_to_delete = [k for k in index if k == s_key or k.startswith(f"{s_key}::")]
+        for k in keys_to_delete:
+            del index[k]
+        if keys_to_delete:
             self._write_index(index)

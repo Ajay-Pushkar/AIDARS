@@ -1,27 +1,13 @@
-"""Scene Engine — the single orchestration entry point for the whole pipeline.
+"""SceneEngine: high-level orchestration facade over the scene intelligence pipeline.
 
-    SceneData
-        |
-        v
-    Scene Engine
-        |
-        +-- DependencyGraphBuilder
-        +-- Integrity Checker
-        +-- VisibilityAnalyzer
-        +-- Smart Packaging (+ Asset Optimizer)
-        +-- Exporters
-
-Every interface that needs "analyze a scene and produce reports" - the CLI
-today, and a future API or GUI - should call SceneEngine.run() rather than
-wiring SceneIntelligenceEngine / DependencyGraphBuilder / SmartPackageBuilder
-/ SceneCache together itself. That wiring is business logic, and business
-logic belongs here, not in any one interface.
-
-The CLI's job is reduced to: parse arguments, build a SceneEngineRequest,
-call SceneEngine.run(), print the result, exit.
+This module is the entry point for callers that want to run the whole
+pipeline (load -> analyze -> graph -> integrity -> visibility -> package ->
+export) or any individual stage in isolation, with unified error handling,
+optional content-based caching, and formatted console/log outputs.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,26 +22,18 @@ from .integrity import IntegrityChecker, IntegrityReport
 from .models import SceneData, SceneSnapshot
 from aidars.scheduler.frame_scheduler import FrameScheduler, SchedulingPlan
 from aidars.smart_package.builder import PackageAsset, PackageManifest, SmartPackageBuilder
-from aidars.visibility.engine import VisibilityAnalyzer, VisibilityReport
+from aidars.visibility import (
+    RenderRequest,
+    RenderRequirementAnalyzer,
+    RenderRequirementReport,
+    VisibilityAnalyzer,
+    VisibilityReport,
+)
 
 
 @dataclass(slots=True)
 class SceneEngineRequest:
-    """Everything needed to run the pipeline for one scene source.
-
-    This is the boundary between "how the caller wants the pipeline
-    configured" (a plain data object, easy to build from argparse, an HTTP
-    request body, or a GUI form) and the orchestration logic itself.
-
-    ``optimize_package_by_visibility`` (default False, only relevant when
-    ``build_package`` is True): runs VisibilityAnalyzer for
-    [frame_start, frame_end] and prunes packaged assets to only those
-    reachable from objects visible in that range, via the dependency graph
-    (see ``aidars.smart_package.optimizer.AssetOptimizer``). Requires
-    building the dependency graph internally even if ``build_graph`` is
-    False (the graph object still won't be written to disk unless
-    ``build_graph`` is also True).
-    """
+    """Everything needed to run the pipeline for one scene source."""
 
     input_path: str
     scene_output: str = "output/scene.json"
@@ -68,29 +46,36 @@ class SceneEngineRequest:
     package_output: str = "output/package.json"
     cache_dir: Optional[str] = None
     blender_executable: Optional[str] = None
+    camera_id: str = ""
+
+    def fingerprint(self) -> str:
+        """Compute a deterministic hash of the pipeline request configuration."""
+        cfg = {
+            "scene_output": self.scene_output,
+            "graph_output": self.graph_output,
+            "package_output": self.package_output,
+            "build_graph": self.build_graph,
+            "build_package": self.build_package,
+            "optimize_package_by_visibility": self.optimize_package_by_visibility,
+            "frame_start": self.frame_start,
+            "frame_end": self.frame_end,
+            "camera_id": self.camera_id,
+            "blender_executable": self.blender_executable,
+        }
+        canonical = json.dumps(cfg, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(slots=True)
 class SceneEngineResult:
-    """Everything a caller might want after a pipeline run.
-
-    ``messages``/``warnings`` are plain strings so the CLI (or any other
-    caller) can display them without needing to know the pipeline's
-    internals - the CLI should not be re-deriving "what should I tell the
-    user" from raw snapshot/graph objects.
-
-    When ``from_cache`` is True, nothing was re-analyzed: ``snapshot``,
-    ``graph``, ``integrity``, and ``package`` are all left as None. Only the
-    output paths (carried over from the previous run) are populated. A
-    caller that needs the actual snapshot/graph objects even on a cache hit
-    should not pass ``cache_dir`` in the request.
-    """
+    """Everything a caller might want after a pipeline run."""
 
     from_cache: bool = False
     snapshot: Optional[SceneSnapshot] = None
     graph: Optional[DependencyGraph] = None
     integrity: Optional[IntegrityReport] = None
     visibility: Optional[VisibilityReport] = None
+    render_requirements: Optional[RenderRequirementReport] = None
     package: Optional[PackageManifest] = None
     scene_output_path: Optional[Path] = None
     graph_output_path: Optional[Path] = None
@@ -100,7 +85,7 @@ class SceneEngineResult:
 
 
 class SceneEngine:
-    """High-level orchestration facade over the scene intelligence pipeline."""
+    """High-level orchestration facade over the scene intelligence and visibility pipelines."""
 
     def __init__(self, blender_executable: Optional[str] = None) -> None:
         self._blender_executable = blender_executable
@@ -108,6 +93,7 @@ class SceneEngine:
         self.graph_builder = DependencyGraphBuilder()
         self.integrity_checker = IntegrityChecker()
         self.visibility_analyzer = VisibilityAnalyzer()
+        self.render_requirement_analyzer = RenderRequirementAnalyzer()
         self.package_builder = SmartPackageBuilder()
         self.frame_scheduler = FrameScheduler(visibility_analyzer=self.visibility_analyzer)
 
@@ -116,33 +102,29 @@ class SceneEngine:
     # ------------------------------------------------------------------ #
 
     def run(self, request: SceneEngineRequest) -> SceneEngineResult:
-        """Run the full pipeline for a single scene source.
-
-        Order: (optional) cache check -> load -> analyze -> (optional)
-        dependency graph + integrity check -> (optional) smart packaging ->
-        export -> (optional) cache write.
-        """
+        """Run the full pipeline for a single scene source with request-aware caching."""
         result = SceneEngineResult()
 
         cache = SceneCache(request.cache_dir) if request.cache_dir else None
         source_hash: Optional[str] = None
+        req_hash = request.fingerprint()
+
         if cache is not None:
-            # Hashing the raw input before doing any other work is what
-            # makes this "incremental scanning" rather than just "don't
-            # rewrite the output file": an unchanged .blend file never even
-            # reaches BlenderAdapter, so Blender is never launched.
             source_hash = hash_source(request.input_path)
-            cached_entry = cache.get(request.input_path)
-            if cached_entry is not None and cached_entry.source_hash == source_hash:
+            cached_entry = cache.get(request.input_path, request_hash=req_hash, verify_artifacts=True)
+            if cached_entry is not None and cached_entry.source_hash == source_hash and cached_entry.request_hash == req_hash:
                 result.from_cache = True
                 result.scene_output_path = Path(cached_entry.scene_output)
                 result.graph_output_path = Path(cached_entry.graph_output) if cached_entry.graph_output else None
+                result.package_output_path = Path(cached_entry.package_output) if cached_entry.package_output else None
                 result.messages.append(
-                    f"No changes detected for {request.input_path}; reusing cached outputs."
+                    f"No changes detected for {request.input_path} (request configuration match); reusing cached outputs."
                 )
                 result.messages.append(f"Scene snapshot: {result.scene_output_path}")
                 if result.graph_output_path:
                     result.messages.append(f"Dependency graph: {result.graph_output_path}")
+                if result.package_output_path:
+                    result.messages.append(f"Package manifest: {result.package_output_path}")
                 return result
 
         payload = self.load_source(request.input_path, blender_executable=request.blender_executable)
@@ -160,9 +142,23 @@ class SceneEngine:
         if request.build_package:
             if request.optimize_package_by_visibility:
                 graph_for_packaging = result.graph or self.build_dependency_graph(result.snapshot)
+                render_req = RenderRequest(
+                    camera_id=request.camera_id,
+                    frame_start=request.frame_start,
+                    frame_end=request.frame_end,
+                )
+                req_report = self.analyze_render_requirements(
+                    snapshot=result.snapshot,
+                    graph=graph_for_packaging,
+                    request=render_req,
+                )
+                result.render_requirements = req_report
                 result.visibility = self.analyze_visibility(result.snapshot, request.frame_start, request.frame_end)
+
+                # Prune to objects identified as required by the full M3 render requirement analysis
+                required_object_ids = set(req_report.required_objects)
                 result.messages.append(
-                    f"Visibility analysis: {len(result.visibility.visible_object_ids)} object(s) visible "
+                    f"Render requirement analysis: {len(required_object_ids)} object(s) required "
                     f"in frames {request.frame_start}-{request.frame_end}"
                 )
                 result.package = self.build_optimized_package(
@@ -170,7 +166,7 @@ class SceneEngine:
                     request.frame_start,
                     request.frame_end,
                     graph_for_packaging,
-                    result.visibility.visible_object_ids,
+                    required_object_ids,
                 )
             else:
                 result.package = self.build_package(payload, request.frame_start, request.frame_end)
@@ -182,16 +178,23 @@ class SceneEngine:
                 request.input_path,
                 SceneCacheEntry(
                     source_hash=source_hash,
+                    request_hash=req_hash,
                     scene_output=str(result.scene_output_path),
                     graph_output=str(result.graph_output_path) if result.graph_output_path else None,
+                    package_output=str(result.package_output_path) if result.package_output_path else None,
+                    build_graph=request.build_graph,
+                    build_package=request.build_package,
+                    optimize_package_by_visibility=request.optimize_package_by_visibility,
+                    frame_start=request.frame_start,
+                    frame_end=request.frame_end,
+                    camera_id=request.camera_id,
                 ),
             )
 
         return result
 
     # ------------------------------------------------------------------ #
-    # Individual pipeline stages (usable standalone, e.g. from tests
-    # or a future API that only needs one stage)
+    # Individual pipeline stages
     # ------------------------------------------------------------------ #
 
     def load_source(
@@ -200,34 +203,17 @@ class SceneEngine:
         *,
         blender_executable: Optional[str] = None,
     ) -> dict[str, Any] | SceneData:
-        """Load a scene source from a JSON payload file or a .blend file.
-
-        Returns a plain dict for JSON input, or a SceneData for .blend
-        input (already normalized by BlenderAdapter).
-
-        Args:
-            input_path: Path to a JSON scene payload or a .blend file.
-            blender_executable: Overrides the executable this SceneEngine
-                instance was constructed with, for this call only. Lets one
-                long-lived SceneEngine serve requests that each specify
-                their own Blender executable (e.g. a future API/GUI).
-        """
+        """Load a scene source from a JSON payload file or a .blend file."""
         path = Path(input_path)
         if not path.exists():
             raise FileNotFoundError(f"Input file not found: {path}")
 
         if path.suffix.lower() == ".blend":
             executable = blender_executable if blender_executable is not None else self._blender_executable
-            adapter = BlenderAdapter(blender_executable=executable)
-            return adapter.load_scene(path)
+            return BlenderAdapter(blender_executable=executable).load_scene(path)
 
         with path.open("r", encoding="utf-8-sig") as handle:
-            data = json.load(handle)
-
-        if not isinstance(data, dict):
-            raise TypeError("Scene payload must be a JSON object")
-
-        return data
+            return json.load(handle)
 
     def analyze(self, source: dict[str, Any] | SceneData) -> SceneSnapshot:
         """Normalize a raw scene source into a SceneSnapshot."""
@@ -238,12 +224,29 @@ class SceneEngine:
         return self.graph_builder.build(snapshot)
 
     def check_integrity(self, graph: DependencyGraph) -> IntegrityReport:
-        """Run integrity checks (missing/unused assets) against a graph."""
+        """Run integrity checks against a graph."""
         return self.integrity_checker.check(graph)
 
     def analyze_visibility(self, snapshot: SceneSnapshot, frame_start: int, frame_end: int) -> VisibilityReport:
-        """Determine which objects are visible somewhere in [frame_start, frame_end]."""
+        """Determine which objects are eligible (visible) in [frame_start, frame_end]."""
         return self.visibility_analyzer.analyze(snapshot, frame_start, frame_end)
+
+    def analyze_render_requirements(
+        self,
+        snapshot: Any,
+        graph: Any = None,
+        request: Optional[RenderRequest | dict[str, Any]] = None,
+        active_camera: Any = None,
+        render_settings: Any = None,
+    ) -> RenderRequirementReport:
+        """Run full Milestone 3 Render Requirement Analysis across geometry, lighting, and dependencies."""
+        return self.render_requirement_analyzer.analyze(
+            snapshot=snapshot,
+            dependency_graph=graph,
+            request=request,
+            active_camera=active_camera,
+            render_settings=render_settings,
+        )
 
     def build_package(
         self,
@@ -263,7 +266,7 @@ class SceneEngine:
         graph: DependencyGraph,
         visible_object_ids: Set[str],
     ) -> PackageManifest:
-        """Build a packaging manifest pruned to assets reachable from visible objects."""
+        """Build a packaging manifest pruned to assets reachable from required objects."""
         assets = self._extract_raw_assets(source)
         return self.package_builder.build_optimized_package(frame_start, frame_end, assets, graph, visible_object_ids)
 
@@ -276,13 +279,7 @@ class SceneEngine:
         frame_end: int,
         worker_count: int,
     ) -> SchedulingPlan:
-        """Partition a frame range across workers, with a real asset-cost estimate per chunk.
-
-        Not part of ``run()``'s default pipeline: there's no Queue/Worker
-        Runtime yet to consume a scheduling plan, so this is available to
-        call directly (from tests, or a future orchestrator) rather than
-        forced into every CLI invocation.
-        """
+        """Partition a frame range across workers with estimated asset-cost per chunk."""
         assets = self._extract_raw_assets(source)
         return self.frame_scheduler.schedule(snapshot, graph, assets, frame_start, frame_end, worker_count)
 
@@ -291,36 +288,33 @@ class SceneEngine:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _extract_raw_assets(source: dict[str, Any] | SceneData) -> list[PackageAsset]:
-        """Pull a raw "assets" list out of a source for smart packaging, if present."""
-        raw = source.raw if isinstance(source, SceneData) else source
-        if not isinstance(raw, dict) or not isinstance(raw.get("assets"), list):
-            return []
-        return [
-            PackageAsset(
-                path=asset.get("path", ""),
-                kind=asset.get("kind", "unknown"),
-                size_bytes=int(asset.get("size_bytes", 0)),
-            )
-            for asset in raw.get("assets", [])
-            if isinstance(asset, dict)
-        ]
+    def _extract_raw_assets(source: dict[str, Any] | SceneData) -> List[PackageAsset]:
+        """Pull raw asset records from source."""
+        raw_list = source.raw.get("assets", []) if isinstance(source, SceneData) else source.get("assets", [])
+        assets: List[PackageAsset] = []
+        for raw in raw_list:
+            if isinstance(raw, dict) and "path" in raw:
+                assets.append(
+                    PackageAsset(
+                        path=raw["path"],
+                        kind=raw.get("kind", "unknown"),
+                        size_bytes=int(raw.get("size_bytes", 0)),
+                    )
+                )
+        return assets
 
     @staticmethod
-    def _format_integrity_warnings(integrity: IntegrityReport) -> list[str]:
-        warnings: list[str] = []
+    def _format_integrity_warnings(integrity: IntegrityReport) -> List[str]:
+        warnings: List[str] = []
         if integrity.missing_targets:
-            preview = ", ".join(integrity.missing_targets[:5])
-            suffix = ", ..." if len(integrity.missing_targets) > 5 else ""
             warnings.append(
-                f"Warning: {len(integrity.missing_targets)} referenced asset(s) "
-                f"could not be resolved: {preview}{suffix}"
+                f"{len(integrity.missing_targets)} referenced asset(s) could not be resolved: "
+                + ", ".join(sorted(integrity.missing_targets))
             )
         if integrity.unused_nodes:
-            preview = ", ".join(node.label for node in integrity.unused_nodes[:5])
-            suffix = ", ..." if len(integrity.unused_nodes) > 5 else ""
+            unused_labels = [n.label for n in integrity.unused_nodes]
             warnings.append(
-                f"Warning: {len(integrity.unused_nodes)} asset(s) appear unused "
-                f"(no incoming reference): {preview}{suffix}"
+                f"{len(integrity.unused_nodes)} asset(s) appear unused in the scene: "
+                + ", ".join(sorted(unused_labels))
             )
         return warnings

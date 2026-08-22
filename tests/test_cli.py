@@ -53,7 +53,8 @@ class CliTests(unittest.TestCase):
             self.assertTrue(graph_out.exists())
 
             graph_payload = json.loads(graph_out.read_text(encoding="utf-8"))
-            self.assertIn("nodes", graph_payload)
+            self.assertIn("dependencies", graph_payload)
+            self.assertIn("project_root", graph_payload)
             self.assertIn("integrity", graph_payload)
 
     def test_no_graph_flag_skips_dependency_graph_output(self) -> None:

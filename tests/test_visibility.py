@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -5,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from aidars.scene_intelligence.engine import SceneIntelligenceEngine
-from aidars.visibility.engine import VisibilityAnalyzer
+from aidars.visibility.engine import VisibilityAnalyzer, VisibilityEngine
 
 
 def _object(name: str, obj_id: str, *, hide_render: bool = False, animation: dict | None = None) -> dict:
@@ -106,5 +107,150 @@ class VisibilityAnalyzerTests(unittest.TestCase):
         self.assertFalse(report.is_visible("obj-moving"))
 
 
+class VisibilityEngineTests(unittest.TestCase):
+    """Comprehensive test suite for VisibilityEngine frustum culling, raycast occlusion, and R4 schema compliance."""
+
+    def setUp(self) -> None:
+        self.engine = VisibilityEngine()
+        self.fixture_path = Path(__file__).resolve().parent / "fixtures" / "visibility_scene_payload.json"
+        with open(self.fixture_path, "r", encoding="utf-8") as f:
+            self.scene_payload = json.load(f)
+
+    def test_evaluate_backward_compatibility(self) -> None:
+        """Verify backward compatibility of VisibilityEngine.evaluate()."""
+        state = self.engine.evaluate({"visibility": {"hide_render": True, "hide_viewport": False}})
+        self.assertTrue(state.hidden)
+        self.assertTrue(state.render_disabled)
+        self.assertFalse(state.viewport_disabled)
+
+    def test_frustum_culling_front_vs_behind(self) -> None:
+        """Objects behind the camera view plane must be culled into unused_objects."""
+        camera = self.scene_payload["active_camera"]
+        render_settings = self.scene_payload["render_settings"]
+        result = self.engine.analyze(active_camera=camera, dependency_graph=self.scene_payload, render_settings=render_settings)
+
+        self.assertIn("Cube_Visible", result["visible_objects"])
+        self.assertIn("Rock_Behind_Camera", result["unused_objects"])
+        self.assertNotIn("Rock_Behind_Camera", result["visible_objects"])
+
+    def test_frustum_culling_lateral_fov(self) -> None:
+        """Objects outside horizontal FOV boundaries must be culled into unused_objects."""
+        camera = self.scene_payload["active_camera"]
+        render_settings = self.scene_payload["render_settings"]
+        result = self.engine.analyze(active_camera=camera, dependency_graph=self.scene_payload, render_settings=render_settings)
+
+        self.assertIn("Sphere_Outside_FOV", result["unused_objects"])
+        self.assertNotIn("Sphere_Outside_FOV", result["visible_objects"])
+
+    def test_frustum_culling_clipping_planes(self) -> None:
+        """Objects beyond far clipping plane or closer than near clipping plane must be culled."""
+        payload = json.loads(json.dumps(self.scene_payload))
+        # Add an object far beyond clip_end (100.0)
+        payload["objects"].append({
+            "name": "Far_Object",
+            "id": "obj-far",
+            "transform": {"location": [0.0, 500.0, 0.0]},
+            "bound_box": [[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]],
+            "visibility": {"hide_render": False},
+        })
+        camera = payload["active_camera"]
+        result = self.engine.analyze(active_camera=camera, dependency_graph=payload)
+
+        self.assertIn("Far_Object", result["unused_objects"])
+        self.assertNotIn("Far_Object", result["visible_objects"])
+
+    def test_raycast_occlusion_query(self) -> None:
+        """Geometry completely obscured behind an opaque object must be placed in unused_objects."""
+        camera = self.scene_payload["active_camera"]
+        render_settings = self.scene_payload["render_settings"]
+        result = self.engine.analyze(active_camera=camera, dependency_graph=self.scene_payload, render_settings=render_settings)
+
+        self.assertIn("Wall_Blocker", result["visible_objects"])
+        self.assertIn("Hidden_Internal_Gear", result["unused_objects"])
+        self.assertNotIn("Hidden_Internal_Gear", result["visible_objects"])
+
+    def test_dependency_tracing_visible_materials_textures(self) -> None:
+        """Visible objects trace active materials and sampled textures; unused asset chains are excluded."""
+        camera = self.scene_payload["active_camera"]
+        render_settings = self.scene_payload["render_settings"]
+        result = self.engine.analyze(active_camera=camera, dependency_graph=self.scene_payload, render_settings=render_settings)
+
+        # Visible objects: Cube_Visible and Wall_Blocker (both use Material_Wall)
+        self.assertIn("Material_Wall", result["required_materials"])
+        self.assertIn("Wall_Albedo.png", result["required_textures"])
+        self.assertIn("Wall_Normal.png", result["required_textures"])
+
+        # Hidden/culled objects materials and textures must NOT be required
+        self.assertNotIn("Material_Rock", result["required_materials"])
+        self.assertNotIn("Rock_Diffuse.png", result["required_textures"])
+        self.assertNotIn("Material_Sphere", result["required_materials"])
+        self.assertNotIn("Sphere_Noise.png", result["required_textures"])
+
+    def test_unused_objects_isolation(self) -> None:
+        """Verify unused_objects is the exact set inversion of all scene objects minus visible_objects."""
+        camera = self.scene_payload["active_camera"]
+        result = self.engine.analyze(active_camera=camera, dependency_graph=self.scene_payload)
+
+        all_names = [obj["name"] for obj in self.scene_payload["objects"]]
+        for name in result["visible_objects"]:
+            self.assertNotIn(name, result["unused_objects"])
+
+        for name in result["unused_objects"]:
+            self.assertNotIn(name, result["visible_objects"])
+
+        combined = set(result["visible_objects"]).union(set(result["unused_objects"]))
+        self.assertEqual(combined, set(all_names))
+
+    def test_exact_r4_output_json_schema(self) -> None:
+        """Output dictionary must strictly adhere to the R4 JSON schema."""
+        camera = self.scene_payload["active_camera"]
+        result = self.engine.analyze(active_camera=camera, dependency_graph=self.scene_payload)
+
+        expected_keys = {"visible_objects", "unused_objects", "required_materials", "required_textures"}
+        self.assertEqual(set(result.keys()), expected_keys)
+
+        for key in expected_keys:
+            self.assertIsInstance(result[key], list)
+            for item in result[key]:
+                self.assertIsInstance(item, str)
+
+        # Validate JSON serializability
+        json_output = json.dumps(result)
+        self.assertIsInstance(json_output, str)
+        deserialized = json.loads(json_output)
+        self.assertEqual(deserialized, result)
+
+    def test_flexible_inputs_json_strings_and_dataclasses(self) -> None:
+        """Support JSON strings as inputs for active_camera, dependency_graph, and render_settings."""
+        camera_str = json.dumps(self.scene_payload["active_camera"])
+        graph_str = json.dumps(self.scene_payload)
+        render_str = json.dumps(self.scene_payload["render_settings"])
+
+        result = self.engine.analyze(active_camera=camera_str, dependency_graph=graph_str, render_settings=render_str)
+
+        self.assertIn("visible_objects", result)
+        self.assertIn("Cube_Visible", result["visible_objects"])
+        self.assertIn("Rock_Behind_Camera", result["unused_objects"])
+
+    def test_dependency_graph_object_input(self) -> None:
+        """Verify VisibilityEngine.analyze handles typed DependencyGraph and SceneSnapshot objects."""
+        from aidars.scene_intelligence.dependency_graph import DependencyGraphBuilder
+
+        engine = SceneIntelligenceEngine()
+        snapshot = engine.analyze_scene_data(self.scene_payload)
+        builder = DependencyGraphBuilder()
+        dep_graph = builder.build(snapshot)
+
+        camera = self.scene_payload["active_camera"]
+        result = self.engine.analyze(active_camera=camera, dependency_graph=dep_graph)
+
+        self.assertIn("visible_objects", result)
+        self.assertIn("Cube_Visible", result["visible_objects"])
+        self.assertIn("Material_Wall", result["required_materials"])
+        self.assertIn("Wall_Albedo.png", result["required_textures"])
+
+
 if __name__ == "__main__":
     unittest.main()
+
+

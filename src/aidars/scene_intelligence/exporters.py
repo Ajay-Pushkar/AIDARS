@@ -216,15 +216,37 @@ class DependencyGraphExporter:
         from .integrity import IntegrityChecker
 
         integrity = IntegrityChecker().check(graph)
+        
+        dependencies = {}
+        has_incoming = set()
+        
+        for node in graph.nodes:
+            dependencies[node.identifier] = {
+                "type": node.kind.capitalize(),
+                "label": node.label,
+                "children": []
+            }
+            
+        for edge in graph.edges:
+            if edge.source in dependencies:
+                if edge.target not in dependencies[edge.source]["children"]:
+                    dependencies[edge.source]["children"].append(edge.target)
+            has_incoming.add(edge.target)
+            
+        scene_children = [
+            node.identifier for node in graph.nodes if node.identifier not in has_incoming
+        ]
+        
+        dependencies["Scene"] = {
+            "type": "Root",
+            "label": "Scene",
+            "children": scene_children
+        }
+
         return {
-            "nodes": [
-                {"id": node.identifier, "label": node.label, "kind": node.kind}
-                for node in graph.nodes
-            ],
-            "edges": [
-                {"source": edge.source, "target": edge.target, "relationship": edge.relationship}
-                for edge in graph.edges
-            ],
+            "schema_version": "1.0",
+            "project_root": "Scene",
+            "dependencies": dependencies,
             "statistics": {
                 "node_count": len(graph.nodes),
                 "edge_count": len(graph.edges),

@@ -1,0 +1,119 @@
+{
+  "metadata": {
+    "name": "Visibility Test Scene",
+    "frame_start": 1,
+    "frame_end": 24,
+    "fps": 24
+  },
+  "render_settings": {
+    "resolution_x": 1920,
+    "resolution_y": 1080,
+    "clip_start": 0.1,
+    "clip_end": 100.0
+  },
+  "active_camera": {
+    "name": "MainCamera",
+    "id": "cam-main",
+    "type": "CAMERA",
+    "transform": {
+      "location": [0.0, -10.0, 0.0],
+      "rotation_euler": [1.5708, 0.0, 0.0]
+    },
+    "camera": {
+      "fov": 60.0,
+      "clip_start": 0.1,
+      "clip_end": 100.0
+    }
+  },
+  "objects": [
+    {
+      "name": "Cube_Visible",
+      "id": "obj-cube-vis",
+      "type": "MESH",
+      "transform": {
+        "location": [-3.0, 5.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "bound_box": [[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]],
+      "visibility": {"hide_render": false, "hide_viewport": false},
+      "materials": [{"name": "Material_Wall", "image_textures": ["Wall_Albedo.png", "Wall_Normal.png"]}]
+    },
+    {
+      "name": "Rock_Behind_Camera",
+      "id": "obj-rock-behind",
+      "type": "MESH",
+      "transform": {
+        "location": [0.0, -20.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "bound_box": [[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]],
+      "visibility": {"hide_render": false, "hide_viewport": false},
+      "materials": [{"name": "Material_Rock", "image_textures": ["Rock_Diffuse.png"]}]
+    },
+    {
+      "name": "Sphere_Outside_FOV",
+      "id": "obj-sphere-side",
+      "type": "MESH",
+      "transform": {
+        "location": [50.0, 5.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "bound_box": [[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]],
+      "visibility": {"hide_render": false, "hide_viewport": false},
+      "materials": [{"name": "Material_Sphere", "image_textures": ["Sphere_Noise.png"]}]
+    },
+    {
+      "name": "Wall_Blocker",
+      "id": "obj-wall",
+      "type": "MESH",
+      "transform": {
+        "location": [0.0, 2.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "bound_box": [[-1.0, -0.1, -1.0], [1.0, 0.1, 1.0]],
+      "visibility": {"hide_render": false, "hide_viewport": false},
+      "materials": [{"name": "Material_Wall", "image_textures": ["Wall_Albedo.png", "Wall_Normal.png"]}]
+    },
+    {
+      "name": "Hidden_Internal_Gear",
+      "id": "obj-gear-occluded",
+      "type": "MESH",
+      "transform": {
+        "location": [0.0, 10.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "bound_box": [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+      "visibility": {"hide_render": false, "hide_viewport": false},
+      "materials": [{"name": "Material_Metal", "image_textures": ["Metal_Roughness.png"]}]
+    }
+  ],
+  "materials": [
+    {
+      "name": "Material_Wall",
+      "shader": "Principled BSDF",
+      "image_textures": ["Wall_Albedo.png", "Wall_Normal.png"]
+    },
+    {
+      "name": "Material_Rock",
+      "shader": "Principled BSDF",
+      "image_textures": ["Rock_Diffuse.png"]
+    },
+    {
+      "name": "Material_Sphere",
+      "shader": "Principled BSDF",
+      "image_textures": ["Sphere_Noise.png"]
+    },
+    {
+      "name": "Material_Metal",
+      "shader": "Principled BSDF",
+      "image_textures": ["Metal_Roughness.png"]
+    }
+  ],
+  "textures": [
+    {"name": "Wall_Albedo.png", "source": "Wall_Albedo.png"},
+    {"name": "Wall_Normal.png", "source": "Wall_Normal.png"},
+    {"name": "Rock_Diffuse.png", "source": "Rock_Diffuse.png"},
+    {"name": "Sphere_Noise.png", "source": "Sphere_Noise.png"},
+    {"name": "Metal_Roughness.png", "source": "Metal_Roughness.png"}
+  ]
+}

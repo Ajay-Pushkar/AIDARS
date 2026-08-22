@@ -1,4 +1,4 @@
-﻿{
+{
     "objects":  [
                     {
                         "visibility":  {
@@ -10,7 +10,10 @@
                         "type":  "MESH",
                         "parent":  null,
                         "modifiers":  [
-
+                                          {
+                                              "name": "Modifier_Array",
+                                              "type": "ARRAY"
+                                          }
                                       ],
                         "materials":  [
                                           {
