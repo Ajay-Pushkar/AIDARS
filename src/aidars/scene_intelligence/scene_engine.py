@@ -21,7 +21,20 @@ from .exporters import DependencyGraphExporter, JsonSceneExporter
 from .integrity import IntegrityChecker, IntegrityReport
 from .models import SceneData, SceneSnapshot
 from aidars.scheduler.frame_scheduler import FrameScheduler, SchedulingPlan
-from aidars.smart_package.builder import PackageAsset, PackageManifest, SmartPackageBuilder
+from aidars.smart_package.builder import (
+    PackageAsset,
+    PackageBuilder,
+    PackageManifest,
+    PackagePlanner,
+    SmartPackageBuilder,
+)
+from aidars.smart_package.models import PackageIntegrityReport, PackagePlan
+from aidars.smart_package.resolver import (
+    DependencyClosureResolver,
+    PhysicalAssetResolver,
+    RequirementResolver,
+)
+from aidars.smart_package.validator import PackageValidator
 from aidars.visibility import (
     RenderRequest,
     RenderRequirementAnalyzer,
@@ -77,6 +90,8 @@ class SceneEngineResult:
     visibility: Optional[VisibilityReport] = None
     render_requirements: Optional[RenderRequirementReport] = None
     package: Optional[PackageManifest] = None
+    package_plan: Optional[PackagePlan] = None
+    package_integrity: Optional[PackageIntegrityReport] = None
     scene_output_path: Optional[Path] = None
     graph_output_path: Optional[Path] = None
     package_output_path: Optional[Path] = None
@@ -95,6 +110,10 @@ class SceneEngine:
         self.visibility_analyzer = VisibilityAnalyzer()
         self.render_requirement_analyzer = RenderRequirementAnalyzer()
         self.package_builder = SmartPackageBuilder()
+        self.m4_package_planner = PackagePlanner()
+        self.m4_package_builder = PackageBuilder(planner=self.m4_package_planner)
+        self.physical_resolver = PhysicalAssetResolver()
+        self.package_validator = PackageValidator()
         self.frame_scheduler = FrameScheduler(visibility_analyzer=self.visibility_analyzer)
 
     # ------------------------------------------------------------------ #
@@ -161,6 +180,48 @@ class SceneEngine:
                     f"Render requirement analysis: {len(required_object_ids)} object(s) required "
                     f"in frames {request.frame_start}-{request.frame_end}"
                 )
+
+                # M4 Smart Packaging Pipeline (M4-A -> M4-B -> M4-C -> M4-D)
+                # Stage M4-A: Requirement & Closure resolution
+                seed_ids = RequirementResolver.resolve(req_report)
+                closure_ids = DependencyClosureResolver.compute_closure(seed_ids, graph_for_packaging)
+
+                # Base directory for physical resolution
+                input_p = Path(request.input_path) if request.input_path else Path.cwd()
+                base_dir = input_p.parent if input_p.exists() and input_p.is_file() else Path.cwd()
+
+                # Stage M4-B: Physical Asset Resolution
+                asset_records = self.physical_resolver.resolve(
+                    closure_ids=closure_ids,
+                    graph=graph_for_packaging,
+                    base_dir=base_dir,
+                    seed_ids=seed_ids,
+                    snapshot=result.snapshot,
+                )
+
+                # Stage M4-C: Package Planning & Construction
+                pkg_id = f"pkg-{request.frame_start}-{request.frame_end}"
+                scene_name = result.snapshot.metadata.name if result.snapshot and result.snapshot.metadata else "scene"
+                plan = self.m4_package_planner.create_plan(
+                    asset_records=asset_records,
+                    package_id=pkg_id,
+                    scene_name=scene_name,
+                    camera=request.camera_id,
+                    frame_start=request.frame_start,
+                    frame_end=request.frame_end,
+                )
+                result.package_plan = plan
+
+                pkg_out_p = Path(request.package_output)
+                pkg_dir = pkg_out_p.parent if pkg_out_p.suffix else pkg_out_p
+
+                # Construct physical package and manifest
+                self.m4_package_builder.build_package(plan, output_dir=pkg_dir)
+
+                # Stage M4-D: Post-Copy Validation
+                result.package_integrity = self.package_validator.validate(plan, package_dir=pkg_dir)
+
+                # Legacy compatibility: build_optimized_package and result.package
                 result.package = self.build_optimized_package(
                     payload,
                     request.frame_start,

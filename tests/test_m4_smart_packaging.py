@@ -1,17 +1,25 @@
-"""Tests for M4-A: Requirement Resolution and Dependency Closure.
+"""Tests for Milestone 4 Smart Packaging: M4-A, M4-B, M4-C, M4-D and SceneEngine Integration.
 
 Verifies:
   RenderRequirementReport
           ↓
-  RequirementResolver
+  RequirementResolver (M4-A)
           ↓
-  Set[str]
+  DependencyClosureResolver (M4-A)
           ↓
-  DependencyClosureResolver
+  PhysicalAssetResolver (M4-B)
           ↓
-  Complete Set[str]
+  PackagePlanner & PackageBuilder (M4-C)
+          ↓
+  PackageValidator (M4-D)
+          ↓
+  SceneEngine Orchestration Integration
 """
+import hashlib
+import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -23,12 +31,30 @@ from aidars.scene_intelligence.dependency_graph import (
     GraphEdge,
     GraphNode,
 )
-from aidars.scene_intelligence.scene_engine import SceneEngine
-from aidars.smart_package.models import AssetType, SelectionReason
+from aidars.scene_intelligence.scene_engine import (
+    SceneEngine,
+    SceneEngineRequest,
+    SceneEngineResult,
+)
+from aidars.smart_package.builder import (
+    PackageBuilder,
+    PackagePlanner,
+)
+from aidars.smart_package.models import (
+    AssetRecord,
+    AssetStatus,
+    AssetType,
+    PackageIntegrityReport,
+    PackagePlan,
+    PackageStatistics,
+    SelectionReason,
+)
 from aidars.smart_package.resolver import (
     DependencyClosureResolver,
+    PhysicalAssetResolver,
     RequirementResolver,
 )
+from aidars.smart_package.validator import PackageValidator
 from aidars.visibility.models import RenderRequest, RenderRequirementReport
 
 
@@ -64,9 +90,6 @@ def _build_graph_from_scene(scene_payload: dict) -> DependencyGraph:
 # Test fixtures
 # ──────────────────────────────────────────────────────────────────
 
-# A scene with two objects: Chair (visible) and Table (hidden).
-# Both share "WoodMat" material which references "wood.png" texture.
-# Chair also has a unique "FabricMat".
 PACKAGING_SCENE = {
     "metadata": {"name": "PackagingTest", "frame_start": 1, "frame_end": 24, "fps": 24},
     "collections": [{"name": "MainCollection", "id": "col-main"}],
@@ -150,6 +173,11 @@ PACKAGING_SCENE = {
 }
 
 
+# ──────────────────────────────────────────────────────────────────
+# M4-A Unit Tests (Requirement & Closure Resolution)
+# ──────────────────────────────────────────────────────────────────
+
+
 class RequirementResolverTests(unittest.TestCase):
     """Tests for RequirementResolver: RenderRequirementReport → Set[str]."""
 
@@ -214,7 +242,6 @@ class RequirementResolverTests(unittest.TestCase):
             required_cameras=["obj-cam"],
         )
         ids = RequirementResolver.resolve(report)
-        # Should contain prefixed and bare versions
         self.assertIn("obj-chair", ids)
         self.assertIn("material:WoodMat", ids)
         self.assertIn("material:FabricMat", ids)
@@ -232,7 +259,6 @@ class RequirementResolverTests(unittest.TestCase):
             required_images=["wood.png"],
         )
         ids = RequirementResolver.resolve(report)
-        # "wood.png" appears as bare, texture:, and image: — all unique strings
         self.assertIn("wood.png", ids)
         self.assertIn("texture:wood.png", ids)
         self.assertIn("image:wood.png", ids)
@@ -306,7 +332,6 @@ class DependencyClosureResolverTests(unittest.TestCase):
 
         self.assertIn("material:WoodMat", closure)
         self.assertIn("asset:arch_library.blend", closure)
-        # WoodMat's downstream should still appear
         self.assertIn("texture:wood.png", closure)
         self.assertIn("image:wood.png", closure)
 
@@ -318,12 +343,10 @@ class DependencyClosureResolverTests(unittest.TestCase):
         self.assertIn("material:WoodMat", closure)
         self.assertIn("texture:wood.png", closure)
         self.assertIn("image:wood.png", closure)
-        # Should NOT pull in Chair or Table (no reverse edges)
         self.assertNotIn("obj-chair", closure)
 
     def test_fuzzy_label_matching_resolves_bare_names(self) -> None:
-        """Seeding with bare name 'WoodMat' (as M3 outputs) should find
-        'material:WoodMat' via label matching and traverse its deps."""
+        """Seeding with bare name 'WoodMat' should find 'material:WoodMat'."""
         graph = self._build_simple_graph()
         closure = DependencyClosureResolver.compute_closure({"WoodMat"}, graph)
 
@@ -339,7 +362,6 @@ class DependencyClosureResolverTests(unittest.TestCase):
         )
         closure = DependencyClosureResolver.compute_closure({"obj-1"}, graph)
         self.assertIn("obj-1", closure)
-        # Dangling target is visited but doesn't crash
         self.assertIn("obj-ghost", closure)
 
     def test_cycle_does_not_cause_infinite_loop(self) -> None:
@@ -369,7 +391,7 @@ class DependencyClosureClassificationTests(unittest.TestCase):
             (GraphNode("t1", "wood.png", "texture"), AssetType.TEXTURE),
             (GraphNode("i1", "wood.png", "image"), AssetType.IMAGE),
             (GraphNode("a1", "lib.blend", "asset"), AssetType.LIBRARY),
-            (GraphNode("o1", "Cube", "object"), AssetType.UNKNOWN),  # needs obj.type
+            (GraphNode("o1", "Cube", "object"), AssetType.UNKNOWN),
             (GraphNode("x1", "???", "something_new"), AssetType.UNKNOWN),
         ]
         for node, expected_type in cases:
@@ -389,7 +411,7 @@ class DependencyClosureClassificationTests(unittest.TestCase):
         closure = {"obj-1", "material:WoodMat", "texture:wood.png", "image:wood.png"}
         partitioned = DependencyClosureResolver.partition_closure(closure, graph)
 
-        self.assertIn(AssetType.UNKNOWN, partitioned)  # object kind → UNKNOWN
+        self.assertIn(AssetType.UNKNOWN, partitioned)
         self.assertIn(AssetType.MATERIAL, partitioned)
         self.assertIn(AssetType.TEXTURE, partitioned)
         self.assertIn(AssetType.IMAGE, partitioned)
@@ -411,7 +433,6 @@ class EndToEndM4ATests(unittest.TestCase):
         """M3 says Chair is required. M4-A should resolve its full dependency closure."""
         graph = _build_graph_from_scene(PACKAGING_SCENE)
 
-        # Simulate M3 output: only Chair is visible
         report = _make_report(
             required_objects=["obj-chair"],
             required_materials=["WoodMat", "FabricMat"],
@@ -421,24 +442,17 @@ class EndToEndM4ATests(unittest.TestCase):
             required_cameras=["obj-cam"],
         )
 
-        # Step 1: Resolve to graph IDs
         seed_ids = RequirementResolver.resolve(report)
         self.assertIn("obj-chair", seed_ids)
         self.assertIn("material:WoodMat", seed_ids)
 
-        # Step 2: Compute closure
         closure = DependencyClosureResolver.compute_closure(seed_ids, graph)
 
-        # Chair and its dependencies should be present
         self.assertIn("obj-chair", closure)
         self.assertIn("material:WoodMat", closure)
         self.assertIn("material:FabricMat", closure)
         self.assertIn("texture:wood.png", closure)
         self.assertIn("image:wood.png", closure)
-
-        # Table's EXCLUSIVE dependency (arch_library.blend) should NOT
-        # be in closure since Table was not required and arch_library
-        # is only reachable via Table
         self.assertNotIn("asset:arch_library.blend", closure)
 
     def test_full_pipeline_both_objects(self) -> None:
@@ -462,7 +476,6 @@ class EndToEndM4ATests(unittest.TestCase):
         self.assertIn("asset:arch_library.blend", closure)
 
     def test_partition_matches_closure(self) -> None:
-        """partition_closure should cover every ID in the closure."""
         graph = _build_graph_from_scene(PACKAGING_SCENE)
         report = _make_report(
             required_objects=["obj-chair"],
@@ -474,20 +487,637 @@ class EndToEndM4ATests(unittest.TestCase):
         closure = DependencyClosureResolver.compute_closure(seed_ids, graph)
         partitioned = DependencyClosureResolver.partition_closure(closure, graph)
 
-        # Every ID in the closure should appear in exactly one partition
         all_partitioned_ids = set()
         for ids_list in partitioned.values():
             all_partitioned_ids.update(ids_list)
 
-        # Only IDs that are actual graph nodes get partitioned
         node_index = graph.node_index()
         closure_in_graph = {cid for cid in closure if cid in node_index}
         closure_not_in_graph = closure - closure_in_graph
 
         self.assertTrue(closure_in_graph.issubset(all_partitioned_ids))
-        # Non-graph IDs go into UNKNOWN
         for phantom in closure_not_in_graph:
             self.assertIn(phantom, partitioned.get(AssetType.UNKNOWN, []))
+
+
+# ──────────────────────────────────────────────────────────────────
+# M4-B Unit Tests (Physical Asset Resolution)
+# ──────────────────────────────────────────────────────────────────
+
+
+class PhysicalAssetResolverTests(unittest.TestCase):
+    """Tests for PhysicalAssetResolver (M4-B)."""
+
+    def setUp(self) -> None:
+        self.resolver = PhysicalAssetResolver()
+
+    def test_embedded_assets_classification(self) -> None:
+        """Objects, meshes, and internal materials get AssetStatus.EMBEDDED with zero byte size."""
+        graph = DependencyGraph(
+            nodes=[
+                GraphNode("obj-chair", "Chair", "object"),
+                GraphNode("material:WoodMat", "WoodMat", "material"),
+                GraphNode("modifier:1:Subsurf", "Subsurf", "modifier"),
+            ],
+            edges=[
+                GraphEdge("obj-chair", "material:WoodMat", "material"),
+            ],
+        )
+        closure_ids = {"obj-chair", "material:WoodMat", "modifier:1:Subsurf"}
+        records = self.resolver.resolve(closure_ids, graph)
+
+        record_map = {r.asset_id: r for r in records}
+        self.assertEqual(len(records), 3)
+
+        chair_rec = record_map["obj-chair"]
+        self.assertEqual(chair_rec.status, AssetStatus.EMBEDDED)
+        self.assertTrue(chair_rec.embedded)
+        self.assertIsNone(chair_rec.source_path)
+        self.assertIsNone(chair_rec.sha256)
+        self.assertEqual(chair_rec.size_bytes, 0)
+        self.assertEqual(chair_rec.dependencies, ["material:WoodMat"])
+
+        mat_rec = record_map["material:WoodMat"]
+        self.assertEqual(mat_rec.status, AssetStatus.EMBEDDED)
+        self.assertEqual(mat_rec.asset_type, AssetType.MATERIAL)
+        self.assertTrue(mat_rec.embedded)
+
+    def test_resolved_external_asset_with_real_file(self) -> None:
+        """Required asset with existing file on disk gets AssetStatus.RESOLVED and valid SHA-256 hash."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            tex_file = base_dir / "wood.png"
+            tex_content = b"fake-png-texture-bytes-12345"
+            tex_file.write_bytes(tex_content)
+            expected_hash = hashlib.sha256(tex_content).hexdigest()
+
+            graph = DependencyGraph(
+                nodes=[
+                    GraphNode("texture:wood.png", "wood.png", "texture"),
+                ],
+                edges=[],
+            )
+
+            records = self.resolver.resolve(
+                closure_ids={"texture:wood.png"},
+                graph=graph,
+                base_dir=base_dir,
+                seed_ids={"texture:wood.png"},
+            )
+
+            self.assertEqual(len(records), 1)
+            rec = records[0]
+            self.assertEqual(rec.asset_id, "texture:wood.png")
+            self.assertEqual(rec.status, AssetStatus.RESOLVED)
+            self.assertFalse(rec.embedded)
+            self.assertEqual(rec.selection_reason, SelectionReason.RENDER_REQUIRED)
+            self.assertEqual(rec.sha256, expected_hash)
+            self.assertEqual(rec.size_bytes, len(tex_content))
+            self.assertEqual(rec.package_path, "assets/wood.png")
+            self.assertEqual(rec.source_path, str(tex_file.resolve()))
+
+    def test_missing_file_flagged_as_missing(self) -> None:
+        """Missing file gets AssetStatus.MISSING, sha256=None, size_bytes=0, and is not dropped."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            graph = DependencyGraph(
+                nodes=[
+                    GraphNode("texture:nonexistent.png", "nonexistent.png", "texture"),
+                ],
+                edges=[],
+            )
+
+            records = self.resolver.resolve(
+                closure_ids={"texture:nonexistent.png"},
+                graph=graph,
+                base_dir=base_dir,
+            )
+
+            self.assertEqual(len(records), 1)
+            rec = records[0]
+            self.assertEqual(rec.asset_id, "texture:nonexistent.png")
+            self.assertEqual(rec.status, AssetStatus.MISSING)
+            self.assertFalse(rec.embedded)
+            self.assertIsNone(rec.sha256)
+            self.assertEqual(rec.size_bytes, 0)
+            self.assertIsNotNone(rec.source_path)
+
+    def test_blender_relative_path_resolution(self) -> None:
+        """Blender '//relative' path is resolved against scene base directory."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            tex_sub = base_dir / "textures"
+            tex_sub.mkdir(parents=True, exist_ok=True)
+            diffuse_file = tex_sub / "diffuse.png"
+            diffuse_file.write_bytes(b"diffuse-texture-data")
+
+            resolved_path, rel_name = self.resolver.resolve_path("//textures/diffuse.png", base_dir=base_dir)
+            self.assertTrue(resolved_path.exists())
+            self.assertEqual(resolved_path, diffuse_file.resolve())
+            self.assertEqual(rel_name.replace("\\", "/"), "textures/diffuse.png")
+
+    def test_absolute_path_resolution(self) -> None:
+        """Absolute paths resolve directly on the filesystem."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            abs_file = Path(tmp_dir) / "absolute_asset.blend"
+            abs_file.write_bytes(b"blend-file-content")
+
+            resolved_path, rel_name = self.resolver.resolve_path(str(abs_file.resolve()))
+            self.assertTrue(resolved_path.exists())
+            self.assertEqual(resolved_path, abs_file.resolve())
+            self.assertEqual(rel_name, "absolute_asset.blend")
+
+    def test_selection_reason_assignment(self) -> None:
+        """Seed IDs get SelectionReason.RENDER_REQUIRED, others get DEPENDENCY."""
+        graph = DependencyGraph(
+            nodes=[
+                GraphNode("obj-chair", "Chair", "object"),
+                GraphNode("material:WoodMat", "WoodMat", "material"),
+            ],
+            edges=[GraphEdge("obj-chair", "material:WoodMat", "material")],
+        )
+        records = self.resolver.resolve(
+            closure_ids={"obj-chair", "material:WoodMat"},
+            graph=graph,
+            seed_ids={"obj-chair"},
+        )
+        record_map = {r.asset_id: r for r in records}
+        self.assertEqual(record_map["obj-chair"].selection_reason, SelectionReason.RENDER_REQUIRED)
+        self.assertEqual(record_map["material:WoodMat"].selection_reason, SelectionReason.DEPENDENCY)
+
+    def test_all_record_fields_populated_in_to_dict(self) -> None:
+        """AssetRecord.to_dict() produces all schema fields with expected types."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            f = base_dir / "test.png"
+            f.write_bytes(b"12345")
+
+            graph = DependencyGraph(
+                nodes=[GraphNode("image:test.png", "test.png", "image")],
+                edges=[],
+            )
+            records = self.resolver.resolve({"image:test.png"}, graph, base_dir=base_dir)
+            d = records[0].to_dict()
+
+            expected_keys = {
+                "asset_id",
+                "type",
+                "status",
+                "selection_reason",
+                "source_path",
+                "relative_path",
+                "package_path",
+                "sha256",
+                "size_bytes",
+                "embedded",
+                "conservative",
+                "dependencies",
+            }
+            self.assertTrue(expected_keys.issubset(d.keys()))
+            self.assertEqual(d["type"], "image")
+            self.assertEqual(d["status"], "resolved")
+
+
+# ──────────────────────────────────────────────────────────────────
+# M4-C Unit Tests (Package Construction & Deduplication)
+# ──────────────────────────────────────────────────────────────────
+
+
+class PackageConstructionTests(unittest.TestCase):
+    """Tests for PackagePlanner and PackageBuilder (M4-C)."""
+
+    def setUp(self) -> None:
+        self.planner = PackagePlanner()
+        self.builder = PackageBuilder(planner=self.planner)
+
+    def test_deduplication_by_sha256(self) -> None:
+        """Two assets with identical SHA-256 hashes are deduplicated to one physical copy in deduplicated_assets."""
+        records = [
+            AssetRecord(
+                asset_id="texture:wood_diffuse.png",
+                asset_type=AssetType.TEXTURE,
+                selection_reason=SelectionReason.RENDER_REQUIRED,
+                source_path="/path/to/wood_diffuse.png",
+                package_path="assets/wood_diffuse.png",
+                status=AssetStatus.RESOLVED,
+                sha256="abc123hash",
+                size_bytes=1000,
+                embedded=False,
+            ),
+            AssetRecord(
+                asset_id="image:wood_copy.png",
+                asset_type=AssetType.IMAGE,
+                selection_reason=SelectionReason.DEPENDENCY,
+                source_path="/path/to/wood_copy.png",
+                package_path="assets/wood_copy.png",
+                status=AssetStatus.RESOLVED,
+                sha256="abc123hash",  # Same SHA-256
+                size_bytes=1000,
+                embedded=False,
+            ),
+            AssetRecord(
+                asset_id="obj-chair",
+                asset_type=AssetType.MESH,
+                selection_reason=SelectionReason.RENDER_REQUIRED,
+                status=AssetStatus.EMBEDDED,
+                embedded=True,
+            ),
+        ]
+
+        plan = self.planner.create_plan(records, package_id="pkg-1-24")
+
+        self.assertEqual(len(plan.all_assets), 3)
+        self.assertEqual(len(plan.deduplicated_assets), 1)
+        self.assertEqual(plan.statistics.total_assets, 3)
+        self.assertEqual(plan.statistics.resolved_assets, 2)
+        self.assertEqual(plan.statistics.duplicate_assets, 1)
+        self.assertEqual(plan.statistics.original_size_bytes, 2000)
+        self.assertEqual(plan.statistics.package_size_bytes, 1000)
+        self.assertEqual(plan.statistics.reduction_percent, 50.0)
+
+    def test_statistics_computation(self) -> None:
+        """Statistics compute total, resolved, embedded, missing, and duplicate metrics."""
+        records = [
+            AssetRecord(asset_id="a1", asset_type=AssetType.TEXTURE, selection_reason=SelectionReason.DEPENDENCY, status=AssetStatus.RESOLVED, sha256="h1", size_bytes=500, embedded=False),
+            AssetRecord(asset_id="a2", asset_type=AssetType.TEXTURE, selection_reason=SelectionReason.DEPENDENCY, status=AssetStatus.RESOLVED, sha256="h2", size_bytes=300, embedded=False),
+            AssetRecord(asset_id="a3", asset_type=AssetType.MESH, selection_reason=SelectionReason.DEPENDENCY, status=AssetStatus.EMBEDDED, embedded=True),
+            AssetRecord(asset_id="a4", asset_type=AssetType.TEXTURE, selection_reason=SelectionReason.DEPENDENCY, status=AssetStatus.MISSING, embedded=False),
+        ]
+        plan = self.planner.create_plan(records, package_id="pkg-test")
+
+        stats = plan.statistics
+        self.assertEqual(stats.total_assets, 4)
+        self.assertEqual(stats.resolved_assets, 2)
+        self.assertEqual(stats.embedded_assets, 1)
+        self.assertEqual(stats.missing_assets, 1)
+        self.assertEqual(stats.duplicate_assets, 0)
+        self.assertEqual(stats.original_size_bytes, 800)
+        self.assertEqual(stats.package_size_bytes, 800)
+        self.assertEqual(stats.reduction_percent, 0.0)
+
+    def test_manifest_schema_v1_generation(self) -> None:
+        """Written manifest JSON contains schema_version, package_id, scene, assets array with hashes, and statistics."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_dir = Path(tmp_dir)
+            records = [
+                AssetRecord(
+                    asset_id="tex-1",
+                    asset_type=AssetType.TEXTURE,
+                    selection_reason=SelectionReason.RENDER_REQUIRED,
+                    status=AssetStatus.RESOLVED,
+                    sha256="deadbeef",
+                    size_bytes=128,
+                    embedded=False,
+                    package_path="assets/tex-1.png",
+                )
+            ]
+            plan = self.planner.create_plan(records, package_id="pkg-v1", scene_name="TestScene", frame_start=5, frame_end=10)
+            manifest_path = self.builder.build_package(plan, output_dir=out_dir)
+
+            self.assertTrue(manifest_path.exists())
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(data["schema_version"], "1.0")
+            self.assertEqual(data["package_id"], "pkg-v1")
+            self.assertEqual(data["scene"]["name"], "TestScene")
+            self.assertEqual(data["scene"]["frame_start"], 5)
+            self.assertEqual(data["scene"]["frame_end"], 10)
+            self.assertEqual(len(data["assets"]), 1)
+            self.assertEqual(data["assets"][0]["sha256"], "deadbeef")
+            self.assertIn("statistics", data)
+            self.assertEqual(data["statistics"]["resolved_assets"], 1)
+
+    def test_package_directory_contains_resolved_assets(self) -> None:
+        """Package directory contains all resolved external assets copied to canonical paths."""
+        with tempfile.TemporaryDirectory() as src_dir, tempfile.TemporaryDirectory() as dst_dir:
+            file_a = Path(src_dir) / "file_a.png"
+            file_b = Path(src_dir) / "file_b.png"
+            file_a.write_bytes(b"content-a")
+            file_b.write_bytes(b"content-b")
+
+            records = [
+                AssetRecord(
+                    asset_id="tex-a",
+                    asset_type=AssetType.TEXTURE,
+                    selection_reason=SelectionReason.RENDER_REQUIRED,
+                    source_path=str(file_a),
+                    package_path="assets/file_a.png",
+                    status=AssetStatus.RESOLVED,
+                    sha256=hashlib.sha256(b"content-a").hexdigest(),
+                    size_bytes=len(b"content-a"),
+                    embedded=False,
+                ),
+                AssetRecord(
+                    asset_id="tex-b",
+                    asset_type=AssetType.TEXTURE,
+                    selection_reason=SelectionReason.DEPENDENCY,
+                    source_path=str(file_b),
+                    package_path="assets/file_b.png",
+                    status=AssetStatus.RESOLVED,
+                    sha256=hashlib.sha256(b"content-b").hexdigest(),
+                    size_bytes=len(b"content-b"),
+                    embedded=False,
+                ),
+                AssetRecord(
+                    asset_id="obj-mesh",
+                    asset_type=AssetType.MESH,
+                    selection_reason=SelectionReason.RENDER_REQUIRED,
+                    status=AssetStatus.EMBEDDED,
+                    embedded=True,
+                ),
+            ]
+
+            plan = self.planner.create_plan(records, package_id="pkg-real")
+            self.builder.build_package(plan, output_dir=dst_dir)
+
+            copied_a = Path(dst_dir) / "assets" / "file_a.png"
+            copied_b = Path(dst_dir) / "assets" / "file_b.png"
+            manifest = Path(dst_dir) / "manifest.json"
+
+            self.assertTrue(copied_a.exists())
+            self.assertTrue(copied_b.exists())
+            self.assertTrue(manifest.exists())
+            self.assertEqual(copied_a.read_bytes(), b"content-a")
+            self.assertEqual(copied_b.read_bytes(), b"content-b")
+
+    def test_deterministic_output_reproducibility(self) -> None:
+        """Running package creation twice on identical inputs produces identical manifest content."""
+        records = [
+            AssetRecord(asset_id="z_asset", asset_type=AssetType.TEXTURE, selection_reason=SelectionReason.DEPENDENCY, status=AssetStatus.RESOLVED, sha256="hash-z", size_bytes=10, embedded=False),
+            AssetRecord(asset_id="a_asset", asset_type=AssetType.TEXTURE, selection_reason=SelectionReason.RENDER_REQUIRED, status=AssetStatus.RESOLVED, sha256="hash-a", size_bytes=20, embedded=False),
+            AssetRecord(asset_id="m_asset", asset_type=AssetType.MESH, selection_reason=SelectionReason.DEPENDENCY, status=AssetStatus.EMBEDDED, embedded=True),
+        ]
+
+        with tempfile.TemporaryDirectory() as dir1, tempfile.TemporaryDirectory() as dir2:
+            plan1 = self.planner.create_plan(records, package_id="pkg-repro")
+            plan2 = self.planner.create_plan(list(reversed(records)), package_id="pkg-repro")
+
+            m1 = self.builder.build_package(plan1, output_dir=dir1)
+            m2 = self.builder.build_package(plan2, output_dir=dir2)
+
+            content1 = m1.read_text(encoding="utf-8")
+            content2 = m2.read_text(encoding="utf-8")
+
+            self.assertEqual(content1, content2)
+            self.assertEqual(
+                hashlib.sha256(content1.encode()).hexdigest(),
+                hashlib.sha256(content2.encode()).hexdigest(),
+            )
+
+    def test_dry_run_mode_creates_no_files(self) -> None:
+        """dry_run=True returns the expected manifest path without creating directories or files."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target_pkg_dir = Path(tmp_dir) / "dry_package"
+            records = [
+                AssetRecord(asset_id="a1", asset_type=AssetType.TEXTURE, selection_reason=SelectionReason.DEPENDENCY, status=AssetStatus.RESOLVED, sha256="h1", size_bytes=100, embedded=False, package_path="assets/a1.png")
+            ]
+            plan = self.planner.create_plan(records, package_id="pkg-dry")
+            manifest_path = self.builder.build_package(plan, output_dir=target_pkg_dir, dry_run=True)
+
+            self.assertEqual(manifest_path, target_pkg_dir / "manifest.json")
+            self.assertFalse(target_pkg_dir.exists())
+
+    def test_missing_assets_tracked_in_plan(self) -> None:
+        """Missing assets appear in plan.missing_assets and in manifest 'missing' array."""
+        records = [
+            AssetRecord(asset_id="missing.png", asset_type=AssetType.TEXTURE, selection_reason=SelectionReason.DEPENDENCY, status=AssetStatus.MISSING, embedded=False)
+        ]
+        plan = self.planner.create_plan(records, package_id="pkg-miss")
+        self.assertEqual(len(plan.missing_assets), 1)
+        self.assertEqual(plan.missing_assets[0].asset_id, "missing.png")
+        self.assertEqual(plan.statistics.missing_assets, 1)
+
+
+# ──────────────────────────────────────────────────────────────────
+# M4-D Unit Tests (Post-Copy Validation)
+# ──────────────────────────────────────────────────────────────────
+
+
+class PackageValidatorTests(unittest.TestCase):
+    """Tests for PackageValidator (M4-D)."""
+
+    def setUp(self) -> None:
+        self.validator = PackageValidator()
+
+    def test_valid_package_integrity_report_verified_true(self) -> None:
+        """Valid package with all files present and matching SHA-256 hashes produces verified=True."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pkg_dir = Path(tmp_dir)
+            assets_dir = pkg_dir / "assets"
+            assets_dir.mkdir(parents=True, exist_ok=True)
+
+            file1 = assets_dir / "tex1.png"
+            file1.write_bytes(b"valid-texture-1")
+            hash1 = hashlib.sha256(b"valid-texture-1").hexdigest()
+
+            plan = PackagePlan(
+                package_id="pkg-val",
+                scene_name="Demo",
+                camera="",
+                frame_start=1,
+                frame_end=24,
+                deduplicated_assets=[
+                    AssetRecord(
+                        asset_id="texture:tex1.png",
+                        asset_type=AssetType.TEXTURE,
+                        selection_reason=SelectionReason.RENDER_REQUIRED,
+                        package_path="assets/tex1.png",
+                        status=AssetStatus.RESOLVED,
+                        sha256=hash1,
+                        size_bytes=len(b"valid-texture-1"),
+                        embedded=False,
+                    )
+                ],
+            )
+
+            report = self.validator.validate(plan, package_dir=pkg_dir)
+
+            self.assertTrue(report.verified)
+            self.assertEqual(report.asset_count, 1)
+            self.assertEqual(report.verified_count, 1)
+            self.assertEqual(report.failed_assets, [])
+            self.assertEqual(report.missing_assets, [])
+
+    def test_tampered_file_detected_in_failed_assets(self) -> None:
+        """Modifying file contents produces verified=False with asset ID in failed_assets."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pkg_dir = Path(tmp_dir)
+            assets_dir = pkg_dir / "assets"
+            assets_dir.mkdir(parents=True, exist_ok=True)
+
+            file1 = assets_dir / "tex1.png"
+            file1.write_bytes(b"tampered-content-bytes")  # Content altered
+
+            original_hash = hashlib.sha256(b"original-content-bytes").hexdigest()
+
+            plan = PackagePlan(
+                package_id="pkg-val",
+                scene_name="Demo",
+                camera="",
+                frame_start=1,
+                frame_end=24,
+                deduplicated_assets=[
+                    AssetRecord(
+                        asset_id="texture:tex1.png",
+                        asset_type=AssetType.TEXTURE,
+                        selection_reason=SelectionReason.RENDER_REQUIRED,
+                        package_path="assets/tex1.png",
+                        status=AssetStatus.RESOLVED,
+                        sha256=original_hash,
+                        size_bytes=100,
+                        embedded=False,
+                    )
+                ],
+            )
+
+            report = self.validator.validate(plan, package_dir=pkg_dir)
+
+            self.assertFalse(report.verified)
+            self.assertEqual(report.verified_count, 0)
+            self.assertIn("texture:tex1.png", report.failed_assets)
+            self.assertEqual(report.missing_assets, [])
+
+    def test_deleted_file_detected_in_missing_assets(self) -> None:
+        """Missing physical file produces verified=False with asset ID in missing_assets."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pkg_dir = Path(tmp_dir)
+
+            plan = PackagePlan(
+                package_id="pkg-val",
+                scene_name="Demo",
+                camera="",
+                frame_start=1,
+                frame_end=24,
+                deduplicated_assets=[
+                    AssetRecord(
+                        asset_id="texture:missing.png",
+                        asset_type=AssetType.TEXTURE,
+                        selection_reason=SelectionReason.RENDER_REQUIRED,
+                        package_path="assets/missing.png",
+                        status=AssetStatus.RESOLVED,
+                        sha256="expectedhash",
+                        size_bytes=100,
+                        embedded=False,
+                    )
+                ],
+            )
+
+            report = self.validator.validate(plan, package_dir=pkg_dir)
+
+            self.assertFalse(report.verified)
+            self.assertEqual(report.verified_count, 0)
+            self.assertIn("texture:missing.png", report.missing_assets)
+
+    def test_validate_manifest_json(self) -> None:
+        """PackageValidator.validate_manifest parses manifest.json directly and validates files."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pkg_dir = Path(tmp_dir)
+            assets_dir = pkg_dir / "assets"
+            assets_dir.mkdir(parents=True, exist_ok=True)
+
+            f = assets_dir / "tex.png"
+            f.write_bytes(b"hello-manifest")
+            h = hashlib.sha256(b"hello-manifest").hexdigest()
+
+            manifest_file = pkg_dir / "manifest.json"
+            manifest_content = {
+                "schema_version": "1.0",
+                "package_id": "pkg-test",
+                "assets": [
+                    {
+                        "asset_id": "tex-1",
+                        "status": "resolved",
+                        "package_path": "assets/tex.png",
+                        "sha256": h,
+                        "embedded": False,
+                    }
+                ],
+            }
+            manifest_file.write_text(json.dumps(manifest_content), encoding="utf-8")
+
+            report = self.validator.validate_manifest(manifest_file)
+            self.assertTrue(report.verified)
+            self.assertEqual(report.verified_count, 1)
+
+
+# ──────────────────────────────────────────────────────────────────
+# SceneEngine M4 Integration Tests
+# ──────────────────────────────────────────────────────────────────
+
+
+class SceneEngineM4IntegrationTests(unittest.TestCase):
+    """Integration tests for SceneEngine running Milestone 4 Smart Packaging."""
+
+    def test_scene_engine_run_with_m4_smart_packaging(self) -> None:
+        """SceneEngine.run with build_package=True, optimize_package_by_visibility=True runs M4 pipeline."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            tex_file = tmp_path / "wood.png"
+            tex_file.write_bytes(b"wood-texture-bytes")
+
+            scene_path = tmp_path / "scene.json"
+            scene_path.write_text(json.dumps(PACKAGING_SCENE), encoding="utf-8")
+
+            engine = SceneEngine()
+            request = SceneEngineRequest(
+                input_path=str(scene_path),
+                scene_output=str(tmp_path / "out" / "scene.json"),
+                graph_output=str(tmp_path / "out" / "graph.json"),
+                package_output=str(tmp_path / "out" / "package.json"),
+                build_package=True,
+                optimize_package_by_visibility=True,
+                frame_start=1,
+                frame_end=24,
+            )
+
+            result = engine.run(request)
+
+            # M3 stage verification
+            self.assertIsNotNone(result.render_requirements)
+            self.assertIsNotNone(result.visibility)
+
+            # M4 stage verification
+            self.assertIsNotNone(result.package_plan)
+            self.assertIsInstance(result.package_plan, PackagePlan)
+            self.assertEqual(result.package_plan.package_id, "pkg-1-24")
+            self.assertGreater(len(result.package_plan.all_assets), 0)
+            self.assertIsNotNone(result.package_plan.statistics)
+
+            # Post-copy integrity verification
+            self.assertIsNotNone(result.package_integrity)
+            self.assertIsInstance(result.package_integrity, PackageIntegrityReport)
+            self.assertTrue(result.package_integrity.verified)
+
+            # Backward compatibility verification
+            self.assertIsNotNone(result.package)
+            self.assertTrue(result.package_output_path.exists())
+
+    def test_scene_engine_missing_asset_handling(self) -> None:
+        """Scene referencing missing external files records them in missing_assets without crashing."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            scene_path = tmp_path / "scene.json"
+            # In PACKAGING_SCENE, fabric.png does not exist on disk in tmp_dir
+            scene_path.write_text(json.dumps(PACKAGING_SCENE), encoding="utf-8")
+
+            engine = SceneEngine()
+            request = SceneEngineRequest(
+                input_path=str(scene_path),
+                scene_output=str(tmp_path / "out" / "scene.json"),
+                graph_output=str(tmp_path / "out" / "graph.json"),
+                package_output=str(tmp_path / "out" / "package.json"),
+                build_package=True,
+                optimize_package_by_visibility=True,
+                frame_start=1,
+                frame_end=24,
+            )
+
+            result = engine.run(request)
+
+            self.assertIsNotNone(result.package_plan)
+            # Missing files should be captured
+            missing_ids = [m.asset_id for m in result.package_plan.missing_assets]
+            self.assertTrue(len(missing_ids) > 0)
 
 
 if __name__ == "__main__":

@@ -58,7 +58,13 @@ Transforms AIDAR from a static visibility checker into a full 3D spatial auditor
 - **Render Influence**: Conservatively preserves active lighting, parent hierarchies, physics simulations (Cloth, Particles, Fluid, Armatures), and world HDRIs.
 - **Dependency Closure**: Computes the transitive closure over the dependency graph to isolate only the required meshes, materials, textures, and images.
 
-### 4. Request-Aware & Disk-Verified Caching
+### 4. Smart Packaging (`src/aidars/smart_package/`)
+- **M4-A Logical Packaging**: Translates semantic M3 reports into canonical graph node identifiers. Computes transitive closures across the dependency graph (cycle-safe, missing-edge tolerant).
+- **M4-B Physical Resolution**: Resolves Blender `//relative` paths and absolute paths. Validates physical existence and streams SHA-256 hashes. Categorizes assets as `RESOLVED`, `MISSING`, or `EMBEDDED`.
+- **M4-C Deduplication & Construction**: Content-addressed deduplication (identical hashes = single physical copy). Computes payload reductions, duplicate counts, and builds deterministic canonical schema v1.0 manifests.
+- **M4-D Validation**: Post-copy physical integrity checks. Recomputes hashes to detect corruption and flags tampered or missing output files.
+
+### 5. Request-Aware & Disk-Verified Caching
 - **Deterministic Fingerprinting**: `SceneEngineRequest.fingerprint()` hashes stage flags, frame ranges, output targets, and camera IDs.
 - **Multi-Request Coexistence**: Prevents false cache hits when identical source files are run with different parameters (e.g. frame ranges or packaging flags).
 - **Artifact Verification**: Actively checks that cached output files still exist on disk before reusing them.
@@ -110,13 +116,13 @@ AIDAR features an extensive unit, integration, facade, and adversarial test suit
 python -m unittest discover tests
 ```
 
-**Status**: ✅ **115/115 tests passing** (0 failures, 0 errors).
+**Status**: ✅ **173/173 tests passing** (0 failures, 0 errors).
 
 ---
 
 ## 🗺️ Roadmap & Next Milestones
 
-- **Milestone 4**: Physical Zero-Waste Packaging (Bundling `.blend` and required assets).
+- **Milestone 4**: COMPLETE - Physical Zero-Waste Packaging (Bundling `.blend` and required assets, Manifest v1.0).
 - **Milestone 5**: Content-Addressed Asset Deduplication & Delta Hashing.
 - **Milestone 6**: Distributed Worker Daemon & Asset Sync Protocol.
 - **Milestone 7**: Intelligent Hardware-Aware Frame Scheduler.
