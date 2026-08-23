@@ -1,8 +1,6 @@
 """Milestone 4 data models for Smart Packaging.
 
-These models define the contracts between M4 components. They do NOT
-replace existing PackageAsset/PackageManifest in builder.py — those
-remain for backward compatibility.
+These models define the contracts between M4 components.
 """
 from __future__ import annotations
 

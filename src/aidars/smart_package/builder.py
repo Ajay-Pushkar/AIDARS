@@ -133,6 +133,54 @@ class PackageBuilder:
     def __init__(self, planner: Optional[PackagePlanner] = None) -> None:
         self.planner = planner or PackagePlanner()
 
+    def build_and_validate(
+        self,
+        plan: PackagePlan,
+        final_output_dir: Union[str, Path],
+        validator: "PackageValidator",
+        scene_source_path: Optional[Union[str, Path]] = None,
+        blender_executable: Optional[str] = None,
+    ) -> "PackageIntegrityReport":
+        """Atomically construct, validate, and publish a package.
+        
+        This builds into a .tmp directory, runs the validator, and if verified,
+        atomically replaces the final output directory.
+        """
+        import os
+        final_dir = Path(final_output_dir)
+        tmp_dir = final_dir.with_suffix(".tmp")
+        
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+            
+        try:
+            self.build_package(
+                plan=plan,
+                output_dir=tmp_dir,
+                scene_source_path=scene_source_path,
+                blender_executable=blender_executable,
+                dry_run=False,
+            )
+            
+            report = validator.validate(
+                plan=plan,
+                package_dir=tmp_dir,
+                blender_executable=blender_executable,
+            )
+            
+            if report.verified:
+                if final_dir.exists():
+                    shutil.rmtree(final_dir)
+                os.replace(tmp_dir, final_dir)
+            else:
+                raise RuntimeError(f"Package validation failed. Missing/failed assets: {report.failed_assets + report.missing_assets}")
+                
+            return report
+            
+        finally:
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir)
+
     def build_package(
         self,
         plan: PackagePlan,

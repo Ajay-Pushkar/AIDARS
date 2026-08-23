@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from aidars.scene_intelligence.scene_engine import SceneEngine, SceneEngineRequest
-from aidars.scene_intelligence.scene_engine import SceneEngine
 
 
 class BlenderIntegrationTests(unittest.TestCase):
@@ -26,19 +25,14 @@ class BlenderIntegrationTests(unittest.TestCase):
             self.skipTest("Blender not found on PATH")
 
     def test_end_to_end_m4_blender_packaging(self) -> None:
-        """Integration test: .blend -> package -> Blender opens packaged .blend -> textures resolve."""
+        """Integration test: .blend -> package -> Blender opens packaged .blend -> loads texture -> smoke render."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             
-            # 1. Create a dummy texture
+            # 1. Generate a source .blend file and a REAL image texture using Blender itself
             tex_dir = tmp_path / "textures"
             tex_dir.mkdir()
             tex_path = tex_dir / "wood.png"
-            # Just create a fake 1x1 png or simple file (Blender will load empty if it's invalid, 
-            # but we just need it to exist physically and have Blender see the filepath)
-            tex_path.write_bytes(b"dummy")
-            
-            # 2. Generate a source .blend file
             source_blend = tmp_path / "source.blend"
             
             create_script = f"""
@@ -47,10 +41,32 @@ import bpy
 # Clear scene
 bpy.ops.wm.read_factory_settings(use_empty=True)
 
+# Create a REAL 64x64 image and save it to disk
+img = bpy.data.images.new("wood.png", width=64, height=64)
+img.filepath = r"{tex_path.resolve().as_posix()}"
+img.file_format = 'PNG'
+# Fill with red color
+img.pixels = [1.0, 0.0, 0.0, 1.0] * (64 * 64)
+img.save()
+
 # Create a mesh
 bpy.ops.mesh.primitive_cube_add()
 cube = bpy.context.active_object
 cube.name = "HeroCube"
+
+# Set up camera and lighting so a smoke render is possible
+camera_data = bpy.data.cameras.new(name='Camera')
+camera_object = bpy.data.objects.new('Camera', camera_data)
+bpy.context.scene.collection.objects.link(camera_object)
+bpy.context.scene.camera = camera_object
+camera_object.location = (0, -5, 0)
+camera_object.rotation_euler = (1.5708, 0, 0)
+
+light_data = bpy.data.lights.new(name="Light", type='POINT')
+light_data.energy = 1000
+light_object = bpy.data.objects.new(name="Light", object_data=light_data)
+bpy.context.scene.collection.objects.link(light_object)
+light_object.location = (2, -2, 2)
 
 # Create material and texture
 mat = bpy.data.materials.new(name="HeroMat")
@@ -62,9 +78,13 @@ tex_node = nodes.new('ShaderNodeTexImage')
 tex_node.name = "MyWoodTexture"
 
 # Load image using ABSOLUTE path
-# Then we rely on the M4 packaging to remap it
-img = bpy.data.images.load(filepath=r"{tex_path.resolve().as_posix()}")
-tex_node.image = img
+img_loaded = bpy.data.images.load(filepath=r"{tex_path.resolve().as_posix()}")
+img_loaded.name = "RealWoodTexture"
+tex_node.image = img_loaded
+
+# Link texture to Principled BSDF
+bsdf = nodes.get('Principled BSDF')
+mat.node_tree.links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
 
 bpy.ops.wm.save_as_mainfile(filepath=r"{source_blend.resolve().as_posix()}")
 """
@@ -77,10 +97,10 @@ bpy.ops.wm.save_as_mainfile(filepath=r"{source_blend.resolve().as_posix()}")
                 check=True
             )
             
-            # Ensure it created the source .blend
             self.assertTrue(source_blend.exists())
+            self.assertTrue(tex_path.exists()) # Real PNG created
             
-            # 3. Run SceneEngine with M4 packaging
+            # 2. Run SceneEngine with M4 packaging
             engine = SceneEngine(blender_executable="blender")
             pkg_dir = tmp_path / "out_pkg" / "pkg"
             request = SceneEngineRequest(
@@ -90,6 +110,7 @@ bpy.ops.wm.save_as_mainfile(filepath=r"{source_blend.resolve().as_posix()}")
                 package_output=str(pkg_dir / "manifest.json"),
                 build_package=True,
                 optimize_package_by_visibility=True,
+                camera_id="Camera"
             )
             
             result = engine.run(request)
@@ -97,37 +118,39 @@ bpy.ops.wm.save_as_mainfile(filepath=r"{source_blend.resolve().as_posix()}")
             self.assertIsNotNone(result.package_plan)
             self.assertTrue(result.package_output_path.exists())
             
-            # The package directory should contain the .blend and the remapped texture
             pkg_blend = pkg_dir / "scene" / "source.blend"
             self.assertTrue(pkg_blend.exists(), "The packaged .blend should exist")
             
-            # Read manifest
             manifest = json.loads(result.package_output_path.read_text(encoding="utf-8"))
             self.assertGreater(len(manifest["assets"]), 0)
             
-            # 4. Run Blender against the PACKAGED .blend to verify external reference remapping
+            # 3. SMOKE RENDER in packaged .blend to prove full resolution and engine capability
+            render_out = tmp_path / "render_output" # Blender adds .png automatically
+            
             verify_script = f"""
 import bpy
 import sys
 
-img = bpy.data.images.get("wood.png")
+img = bpy.data.images.get("RealWoodTexture")
 if not img:
     print("IMAGE_NOT_FOUND")
     sys.exit(1)
 
-filepath = img.filepath
-print(f"TEXTURE_FILEPATH: {{filepath}}")
-
-# Verify it starts with //
-if not filepath.startswith("//"):
-    print("ERROR_NOT_RELATIVE")
+# Ensure it has dimensions (Blender located the file header)
+if img.size[0] == 0 or img.size[1] == 0:
+    print("IMAGE_NOT_DECODED_PROPERLY")
     sys.exit(1)
 
-# Verify the file physically exists relative to the .blend
-import os
-abs_path = bpy.path.abspath(filepath)
-if not os.path.exists(abs_path):
-    print("ERROR_FILE_MISSING")
+# Do a headless smoke render
+bpy.context.scene.render.engine = 'CYCLES'  # or EEVEE
+bpy.context.scene.render.filepath = r"{render_out.resolve().as_posix()}"
+bpy.context.scene.render.resolution_x = 32
+bpy.context.scene.render.resolution_y = 32
+
+try:
+    bpy.ops.render.render(write_still=True)
+except Exception as e:
+    print(f"RENDER_FAILED: {{e}}")
     sys.exit(1)
 
 print("SUCCESS")
@@ -142,5 +165,5 @@ print("SUCCESS")
             )
             
             output = proc.stdout + proc.stderr
-            self.assertIn("SUCCESS", output, f"Verification script failed. Output: {output}")
-            self.assertIn("TEXTURE_FILEPATH: //", output)
+            self.assertIn("SUCCESS", output, f"Smoke render script failed. Output: {output}")
+            self.assertTrue((tmp_path / "render_output.png").exists(), "Render output file was not produced, meaning render failed.")

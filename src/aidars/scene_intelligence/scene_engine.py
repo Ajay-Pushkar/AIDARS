@@ -208,36 +208,16 @@ class SceneEngine:
             pkg_out_p = Path(request.package_output)
             pkg_dir = pkg_out_p.parent if pkg_out_p.suffix else pkg_out_p
             
-            import os
-            import shutil
-            tmp_dir = pkg_dir.with_suffix('.tmp')
-            if tmp_dir.exists():
-                shutil.rmtree(tmp_dir)
-                
-            try:
-                self.m4_package_builder.build_package(
-                    plan,
-                    output_dir=tmp_dir,
-                    scene_source_path=request.input_path,
-                    blender_executable=request.blender_executable or getattr(self, "_blender_executable", None),
-                )
-                result.package_integrity = self.package_validator.validate(
-                    plan,
-                    package_dir=tmp_dir,
-                    blender_executable=request.blender_executable or getattr(self, "_blender_executable", None),
-                )
-                
-                if result.package_integrity.verified:
-                    if pkg_dir.exists():
-                        shutil.rmtree(pkg_dir)
-                    os.replace(tmp_dir, pkg_dir)
-                    result.package_output_path = pkg_dir / "manifest.json"
-                    result.messages.append(f"Physical package created at {pkg_dir}")
-                else:
-                    raise RuntimeError(f"Package validation failed. Failed assets: {[a.asset_id for a in result.package_integrity.failed_assets]}")
-            finally:
-                if tmp_dir.exists():
-                    shutil.rmtree(tmp_dir)
+            result.package_integrity = self.m4_package_builder.build_and_validate(
+                plan=plan,
+                final_output_dir=pkg_dir,
+                validator=self.package_validator,
+                scene_source_path=request.input_path,
+                blender_executable=request.blender_executable or getattr(self, "_blender_executable", None),
+            )
+            
+            result.package_output_path = pkg_dir / "manifest.json"
+            result.messages.append(f"Physical package created at {pkg_dir}")
 
         if cache is not None and source_hash is not None:
             cache.put(
