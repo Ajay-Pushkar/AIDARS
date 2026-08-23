@@ -150,12 +150,22 @@ class BlenderAdapter:
                 "Blender returned an empty payload."
             )
 
+        # Extract the actual JSON payload by finding the first '{' and the last '}'
+        # This handles Blender's startup noise (e.g., "Blender 4.x ...", warnings, etc.)
+        start_idx = stdout.find("{")
+        end_idx = stdout.rfind("}")
+        
+        if start_idx == -1 or end_idx == -1 or end_idx < start_idx:
+            raise RuntimeError(f"Blender output did not contain valid JSON wrapper. Output: {stdout[:200]}...")
+            
+        json_str = stdout[start_idx:end_idx+1]
+
         try:
-            payload = json.loads(stdout)
+            payload = json.loads(json_str)
 
         except json.JSONDecodeError as exc:
             raise RuntimeError(
-                "Blender returned invalid JSON."
+                f"Blender returned invalid JSON. Raw string (truncated): {json_str[:100]}..."
             ) from exc
 
         if not isinstance(payload, dict):
@@ -175,12 +185,15 @@ class BlenderAdapter:
                 "blender_executable is required."
             )
 
+        import shutil
         executable = Path(self.blender_executable)
 
         if not executable.exists():
-            raise FileNotFoundError(
-                executable
-            )
+            resolved = shutil.which(self.blender_executable)
+            if resolved:
+                executable = Path(resolved)
+            else:
+                raise FileNotFoundError(executable)
 
         return [
             str(executable),

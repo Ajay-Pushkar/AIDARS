@@ -219,7 +219,7 @@ class SceneEngine:
                     plan,
                     output_dir=tmp_dir,
                     scene_source_path=request.input_path,
-                    blender_executable=request.blender_executable,
+                    blender_executable=request.blender_executable or getattr(self, "_blender_executable", None),
                 )
                 result.package_integrity = self.package_validator.validate(plan, package_dir=tmp_dir)
                 

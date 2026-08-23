@@ -12,7 +12,7 @@ def remap_paths(mapping_file):
     for img in bpy.data.images:
         if img.filepath:
             abs_path = bpy.path.abspath(img.filepath)
-            new_path = mapping.get(abs_path) or mapping.get(img.filepath)
+            new_path = mapping.get(abs_path) or mapping.get(img.filepath) or mapping.get(img.name)
             if new_path:
                 img.filepath = new_path
                 changed = True
@@ -21,7 +21,7 @@ def remap_paths(mapping_file):
     for lib in bpy.data.libraries:
         if lib.filepath:
             abs_path = bpy.path.abspath(lib.filepath)
-            new_path = mapping.get(abs_path) or mapping.get(lib.filepath)
+            new_path = mapping.get(abs_path) or mapping.get(lib.filepath) or mapping.get(lib.name)
             if new_path:
                 lib.filepath = new_path
                 changed = True
@@ -30,7 +30,7 @@ def remap_paths(mapping_file):
     for cache in getattr(bpy.data, "cache_files", []):
         if cache.filepath:
             abs_path = bpy.path.abspath(cache.filepath)
-            new_path = mapping.get(abs_path) or mapping.get(cache.filepath)
+            new_path = mapping.get(abs_path) or mapping.get(cache.filepath) or mapping.get(cache.name)
             if new_path:
                 cache.filepath = new_path
                 changed = True
@@ -39,7 +39,7 @@ def remap_paths(mapping_file):
     for volume in getattr(bpy.data, "volumes", []):
         if volume.filepath:
             abs_path = bpy.path.abspath(volume.filepath)
-            new_path = mapping.get(abs_path) or mapping.get(volume.filepath)
+            new_path = mapping.get(abs_path) or mapping.get(volume.filepath) or mapping.get(volume.name)
             if new_path:
                 volume.filepath = new_path
                 changed = True

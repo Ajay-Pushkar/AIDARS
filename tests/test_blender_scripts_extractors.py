@@ -319,7 +319,7 @@ class InspectSceneMainTests(unittest.TestCase):
         )
 
         fake_bpy = SimpleNamespace(
-            data=SimpleNamespace(collections=[main_collection]),
+            data=SimpleNamespace(collections=[main_collection], images=[]),
             context=SimpleNamespace(scene=fake_scene),
             app=SimpleNamespace(version=(4, 5, 0), background=True),
         )

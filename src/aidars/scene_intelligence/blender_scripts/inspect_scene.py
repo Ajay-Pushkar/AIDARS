@@ -11,13 +11,20 @@ object_extractor.py) and in serializers/payload_builder.py.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
+
+# Ensure Blender's embedded Python can find adjacent modules
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.append(script_dir)
 
 import bpy
 
 from collection_extractor import extract_collections
 from object_extractor import extract_objects
+from image_extractor import extract_images
 from scene_metadata import extract_scene_metadata
 from serializers.payload_builder import build_error_payload, build_payload, validate_environment
 
@@ -32,11 +39,13 @@ def main() -> int:
         metadata = extract_scene_metadata(scene)
         collections = extract_collections()
         objects = extract_objects(scene)
+        images = extract_images()
 
         payload = build_payload(
             metadata,
             collections,
             objects,
+            images,
             duration_seconds=time.perf_counter() - start,
             blender_version=bpy.app.version,
             background_mode=bpy.app.background,

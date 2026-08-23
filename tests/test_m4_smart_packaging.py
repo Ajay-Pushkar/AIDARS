@@ -912,7 +912,7 @@ class PackageConstructionTests(unittest.TestCase):
                 self.assertTrue(mapping_file.exists())
                 
                 mapping = json.loads(mapping_file.read_text())
-                self.assertEqual(mapping[str(asset_file.resolve())], "//assets/texture.png")
+                self.assertEqual(mapping[str(asset_file.resolve())], "//../assets/texture.png")
                 
                 # Check that subprocess.run was called with expected arguments
                 mock_run.assert_called_once()

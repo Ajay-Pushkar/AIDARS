@@ -304,7 +304,19 @@ class PackageBuilder:
                 src = Path(record.source_path)
                 dst = dest_dir / record.package_path
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                mapping[str(src.resolve())] = "//" + record.package_path
+                new_path = "//../" + record.package_path
+                mapping[str(src.resolve())] = new_path
+                
+                if record.relative_path is not None:
+                    mapping[record.relative_path.replace("\\", "/")] = new_path
+                    mapping[record.relative_path] = new_path
+                
+                # Also map by asset_id (e.g. image:wood.png -> wood.png)
+                if ":" in record.asset_id:
+                    mapping[record.asset_id.split(":", 1)[1]] = new_path
+                else:
+                    mapping[record.asset_id] = new_path
+
                 if src.exists() and src.is_file():
                     shutil.copy2(src.resolve(), dst)
                     if dst.is_symlink():

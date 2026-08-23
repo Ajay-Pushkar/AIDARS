@@ -93,6 +93,11 @@ class DependencyGraphBuilder:
         for collection in snapshot.collections:
             add_node(collection.id, collection.name, "collection")
 
+        if hasattr(snapshot, "images") and snapshot.images:
+            for img in snapshot.images:
+                if "filepath" in img and img["filepath"]:
+                    add_node(f"image:{img['name']}", img["filepath"], "image")
+
         for obj in snapshot.objects:
             add_node(obj.id, obj.name, "object")
 

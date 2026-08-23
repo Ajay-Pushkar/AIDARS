@@ -30,6 +30,7 @@ def build_payload(
     metadata: dict,
     collections: list,
     objects: list,
+    images: list,
     *,
     duration_seconds: float,
     blender_version: Any,
@@ -41,6 +42,7 @@ def build_payload(
         metadata: Output of ``scene_metadata.extract_scene_metadata``.
         collections: Output of ``collection_extractor.extract_collections``.
         objects: Output of ``object_extractor.extract_objects``.
+        images: Output of ``image_extractor.extract_images``.
         duration_seconds: Wall-clock time the inspection took.
         blender_version: ``bpy.app.version`` (a tuple-like of ints).
         background_mode: ``bpy.app.background``.
@@ -56,12 +58,12 @@ def build_payload(
         "collections": collections,
         "objects": objects,
         # No extractor exists yet for scene-level (as opposed to per-object)
-        # lights/materials/textures/images; per-object materials already
+        # lights/materials/textures; per-object materials already
         # flow through `objects`. See docs/scene_engine_architecture.md.
         "lights": [],
         "materials": [],
         "textures": [],
-        "images": [],
+        "images": images,
         "inspection": {
             "duration_seconds": round(duration_seconds, 6),
             "blender_version": list(blender_version),
