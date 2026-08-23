@@ -136,6 +136,10 @@ class PackagePlan:
     statistics: PackageStatistics = field(default_factory=PackageStatistics)
 
     def to_dict(self) -> Dict[str, Any]:
+        # Sort assets by asset_id to ensure deterministic manifest output O(A log A)
+        sorted_assets = sorted(self.all_assets, key=lambda a: a.asset_id)
+        sorted_missing = sorted(self.missing_assets, key=lambda a: a.asset_id)
+        
         return {
             "schema_version": "1.0",
             "package_id": self.package_id,
@@ -145,8 +149,8 @@ class PackagePlan:
                 "frame_start": self.frame_start,
                 "frame_end": self.frame_end,
             },
-            "assets": [a.to_dict() for a in self.all_assets],
-            "missing": [a.to_dict() for a in self.missing_assets],
+            "assets": [a.to_dict() for a in sorted_assets],
+            "missing": [a.to_dict() for a in sorted_missing],
             "statistics": self.statistics.to_dict(),
         }
 
