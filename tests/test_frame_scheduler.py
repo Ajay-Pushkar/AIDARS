@@ -7,7 +7,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from aidars.scene_intelligence.dependency_graph import DependencyGraphBuilder
 from aidars.scene_intelligence.engine import SceneIntelligenceEngine
 from aidars.scheduler.frame_scheduler import FrameScheduler
-from aidars.smart_package.builder import PackageAsset
 
 BASE_SCENE = {
     "metadata": {"name": "Demo", "frame_start": 1, "frame_end": 100, "fps": 24},
@@ -43,7 +42,7 @@ class FrameSchedulerTests(unittest.TestCase):
                 }
             ]
         )
-        plan = self.scheduler.schedule(snapshot, graph, [], frame_start=1, frame_end=100, worker_count=4)
+        plan = self.scheduler.schedule(snapshot, graph, {}, frame_start=1, frame_end=100, worker_count=4)
 
         self.assertEqual(len(plan.chunks), 4)
         self.assertEqual(plan.chunks[0].frame_start, 1)
@@ -83,7 +82,7 @@ class FrameSchedulerTests(unittest.TestCase):
                 }
             ]
         )
-        assets = [PackageAsset(path="/assets/setpiece.blend", kind="blend", size_bytes=9_000_000)]
+        assets = {"/assets/setpiece.blend": 9_000_000}
 
         plan = self.scheduler.schedule(snapshot, graph, assets, frame_start=1, frame_end=100, worker_count=4)
 
@@ -95,7 +94,7 @@ class FrameSchedulerTests(unittest.TestCase):
 
     def test_worker_count_exceeding_frame_count_yields_fewer_chunks(self) -> None:
         snapshot, graph = self._build([])
-        plan = self.scheduler.schedule(snapshot, graph, [], frame_start=1, frame_end=3, worker_count=10)
+        plan = self.scheduler.schedule(snapshot, graph, {}, frame_start=1, frame_end=3, worker_count=10)
 
         # Can't usefully split 3 frames across 10 workers - only 3 chunks make sense.
         self.assertEqual(len(plan.chunks), 3)
@@ -105,12 +104,12 @@ class FrameSchedulerTests(unittest.TestCase):
     def test_invalid_worker_count_raises(self) -> None:
         snapshot, graph = self._build([])
         with self.assertRaises(ValueError):
-            self.scheduler.schedule(snapshot, graph, [], frame_start=1, frame_end=10, worker_count=0)
+            self.scheduler.schedule(snapshot, graph, {}, frame_start=1, frame_end=10, worker_count=0)
 
     def test_invalid_frame_range_raises(self) -> None:
         snapshot, graph = self._build([])
         with self.assertRaises(ValueError):
-            self.scheduler.schedule(snapshot, graph, [], frame_start=10, frame_end=1, worker_count=2)
+            self.scheduler.schedule(snapshot, graph, {}, frame_start=10, frame_end=1, worker_count=2)
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ from aidars.smart_package.builder import (
     PackageBuilder,
     PackagePlanner,
 )
-from aidars.scheduler.optimizer import PackageAsset
+
 from aidars.smart_package.models import PackageIntegrityReport, PackagePlan
 from aidars.smart_package.resolver import (
     DependencyClosureResolver,
@@ -328,19 +328,13 @@ class SceneEngine:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _extract_raw_assets(source: dict[str, Any] | SceneData) -> List[PackageAsset]:
+    def _extract_raw_assets(source: dict[str, Any] | SceneData) -> Dict[str, int]:
         """Pull raw asset records from source."""
         raw_list = source.raw.get("assets", []) if isinstance(source, SceneData) else source.get("assets", [])
-        assets: List[PackageAsset] = []
+        assets: Dict[str, int] = {}
         for raw in raw_list:
             if isinstance(raw, dict) and "path" in raw:
-                assets.append(
-                    PackageAsset(
-                        path=raw["path"],
-                        kind=raw.get("kind", "unknown"),
-                        size_bytes=int(raw.get("size_bytes", 0)),
-                    )
-                )
+                assets[raw["path"]] = int(raw.get("size_bytes", 0))
         return assets
 
     @staticmethod

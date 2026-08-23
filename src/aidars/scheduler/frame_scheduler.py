@@ -28,15 +28,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Dict, Set
 
-from aidars.scheduler.optimizer import AssetOptimizer, PackageAsset
 from aidars.visibility.engine import VisibilityAnalyzer
+from aidars.visibility.analyzer import RenderRequirementAnalyzer
+from aidars.visibility.models import RenderRequest
+from aidars.smart_package.resolver import RequirementResolver, DependencyClosureResolver
 
 if TYPE_CHECKING:
     from aidars.scene_intelligence.dependency_graph import DependencyGraph
     from aidars.scene_intelligence.models import SceneSnapshot
-    
 
 
 @dataclass(slots=True)
@@ -77,29 +78,31 @@ class FrameScheduler:
     def __init__(
         self,
         visibility_analyzer: "VisibilityAnalyzer | None" = None,
-        optimizer: "AssetOptimizer | None" = None,
+        requirement_analyzer: "RenderRequirementAnalyzer | None" = None,
     ) -> None:
         self.visibility_analyzer = visibility_analyzer or VisibilityAnalyzer()
-        self.optimizer = optimizer or AssetOptimizer()
+        self.requirement_analyzer = requirement_analyzer or RenderRequirementAnalyzer()
 
     def schedule(
         self,
         snapshot: "SceneSnapshot",
         graph: "DependencyGraph",
-        assets: List["PackageAsset"],
+        asset_sizes: Dict[str, int],
         frame_start: int,
         frame_end: int,
         worker_count: int,
+        camera_id: str = "",
     ) -> SchedulingPlan:
         """Split [frame_start, frame_end] into worker_count contiguous chunks.
 
         Args:
             snapshot: An already-analyzed scene snapshot.
             graph: A built dependency graph for the scene.
-            assets: Candidate assets (e.g. from the raw scene payload).
+            asset_sizes: Mapping of physical file paths to size in bytes.
             frame_start: First frame of the job (inclusive).
             frame_end: Last frame of the job (inclusive).
             worker_count: How many chunks to split the range into. Must be >= 1.
+            camera_id: Optional camera name to restrict visibility.
 
         Returns:
             A SchedulingPlan with one ScheduledChunk per worker, each
@@ -118,7 +121,7 @@ class FrameScheduler:
         worker_index = 0
         while frame <= frame_end:
             chunk_end = min(frame + chunk_size - 1, frame_end)
-            chunks.append(self._build_chunk(snapshot, graph, assets, frame, chunk_end, worker_index))
+            chunks.append(self._build_chunk(snapshot, graph, asset_sizes, frame, chunk_end, worker_index, camera_id))
             frame = chunk_end + 1
             worker_index += 1
 
@@ -128,19 +131,41 @@ class FrameScheduler:
         self,
         snapshot: "SceneSnapshot",
         graph: "DependencyGraph",
-        assets: List["PackageAsset"],
+        asset_sizes: Dict[str, int],
         frame_start: int,
         frame_end: int,
         worker_index: int,
+        camera_id: str,
     ) -> ScheduledChunk:
-        visibility = self.visibility_analyzer.analyze(snapshot, frame_start, frame_end)
-        optimization = self.optimizer.optimize(graph, visibility.visible_object_ids, assets)
-        estimated_bytes = sum(asset.size_bytes for asset in optimization.kept_assets)
+        request = RenderRequest(
+            camera_id=camera_id,
+            frame_start=frame_start,
+            frame_end=frame_end,
+        )
+        report = self.requirement_analyzer.analyze(snapshot, graph, request)
+        
+        seed_ids = RequirementResolver.resolve(report)
+        closure_ids = DependencyClosureResolver.compute_closure(seed_ids, graph)
+        
+        # Calculate size based on reached assets
+        estimated_bytes = 0
+        node_index = graph.node_index()
+        known_labels = set(node.label for node in graph.nodes if node.kind == "asset")
+        
+        reached_paths = {
+            node_index[nid].label
+            for nid in closure_ids
+            if nid in node_index and node_index[nid].kind == "asset"
+        }
+        
+        for asset_path, size in asset_sizes.items():
+            if asset_path not in known_labels or asset_path in reached_paths:
+                estimated_bytes += size
 
         return ScheduledChunk(
             worker_id=f"worker-{worker_index}",
             frame_start=frame_start,
             frame_end=frame_end,
             estimated_asset_bytes=estimated_bytes,
-            visible_object_count=len(visibility.visible_object_ids),
+            visible_object_count=len(report.required_objects),
         )
