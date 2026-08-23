@@ -80,7 +80,7 @@ class TestPhysicalAssetResolverAdversarialPathEdgeCases(unittest.TestCase):
         self.assertEqual(records[0].size_bytes, len(b"deep-texture-data-12345"))
 
     def test_relative_parent_directory_traversal(self) -> None:
-        """Parent directory traversal '//../../external/tex.png' resolves outside base_dir."""
+        """Parent directory traversal '//../../external/tex.png' now raises a ValueError due to security boundary."""
         sub_base = self.base_path / "project" / "scenes"
         sub_base.mkdir(parents=True, exist_ok=True)
 
@@ -90,19 +90,15 @@ class TestPhysicalAssetResolverAdversarialPathEdgeCases(unittest.TestCase):
         ext_file.write_bytes(b"shared-texture-bytes")
 
         raw_path = "//../../external/shared_tex.png"
-        resolved_path, clean_rel = self.resolver.resolve_path(raw_path, base_dir=sub_base)
-
-        self.assertTrue(resolved_path.exists())
-        self.assertEqual(resolved_path, ext_file.resolve())
+        with self.assertRaises(ValueError):
+            self.resolver.resolve_path(raw_path, base_dir=sub_base)
 
         graph = DependencyGraph(
             nodes=[GraphNode("image:ext", raw_path, "image")],
             edges=[],
         )
-        records = self.resolver.resolve({"image:ext"}, graph, base_dir=sub_base)
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0].status, AssetStatus.RESOLVED)
-        self.assertEqual(records[0].sha256, hashlib.sha256(b"shared-texture-bytes").hexdigest())
+        with self.assertRaises(ValueError):
+            self.resolver.resolve({"image:ext"}, graph, base_dir=sub_base)
 
     def test_windows_backslashes_and_mixed_separators(self) -> None:
         """Blender path with double-backslash or mixed slashes resolves consistently."""

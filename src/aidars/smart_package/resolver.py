@@ -257,6 +257,7 @@ class PhysicalAssetResolver:
         self,
         raw_path: str,
         base_dir: Optional[Union[str, Path]] = None,
+        enforce_project_boundary: bool = True,
     ) -> Tuple[Path, str]:
         """Resolve a raw path string to an absolute Path and normalized relative path.
 
@@ -267,30 +268,45 @@ class PhysicalAssetResolver:
         """
         effective_base = Path(base_dir) if base_dir else (self.base_dir or Path.cwd())
 
+        # Normalize Windows backslashes for POSIX compatibility
+        normalized_raw = raw_path.replace("\\", "/")
+
+        candidate = None
+        clean_rel = ""
+
         # Blender relative path
-        if raw_path.startswith("//") or raw_path.startswith("\\\\"):
-            clean_rel = raw_path[2:].lstrip("/\\")
+        if normalized_raw.startswith("//"):
+            clean_rel = normalized_raw[2:].lstrip("/")
             candidate = (effective_base / clean_rel).resolve()
             if not candidate.exists() and self.search_paths:
                 for sp in self.search_paths:
                     alt = (sp / clean_rel).resolve()
                     if alt.exists():
-                        return alt, clean_rel
-            return candidate, clean_rel
+                        candidate = alt
+                        break
+        else:
+            p = Path(normalized_raw)
+            if p.is_absolute():
+                candidate = p.resolve()
+                clean_rel = p.name
+            else:
+                # Standard relative path
+                clean_rel = normalized_raw
+                candidate = (effective_base / clean_rel).resolve()
+                if not candidate.exists() and self.search_paths:
+                    for sp in self.search_paths:
+                        alt = (sp / clean_rel).resolve()
+                        if alt.exists():
+                            candidate = alt
+                            break
 
-        p = Path(raw_path)
-        if p.is_absolute():
-            candidate = p.resolve()
-            return candidate, p.name
+        if enforce_project_boundary:
+            allowed = [effective_base.resolve()] + [sp.resolve() for sp in self.search_paths]
+            is_allowed = any(candidate.is_relative_to(root) for root in allowed)
+            if not is_allowed:
+                raise ValueError(f"Security violation: path {candidate} escapes allowed project boundaries.")
 
-        # Standard relative path
-        candidate = (effective_base / raw_path).resolve()
-        if not candidate.exists() and self.search_paths:
-            for sp in self.search_paths:
-                alt = (sp / raw_path).resolve()
-                if alt.exists():
-                    return alt, raw_path
-        return candidate, raw_path
+        return candidate, clean_rel
 
     def resolve(
         self,

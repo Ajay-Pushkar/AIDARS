@@ -622,7 +622,7 @@ class PhysicalAssetResolverTests(unittest.TestCase):
             abs_file = Path(tmp_dir) / "absolute_asset.blend"
             abs_file.write_bytes(b"blend-file-content")
 
-            resolved_path, rel_name = self.resolver.resolve_path(str(abs_file.resolve()))
+            resolved_path, rel_name = self.resolver.resolve_path(str(abs_file.resolve()), enforce_project_boundary=False)
             self.assertTrue(resolved_path.exists())
             self.assertEqual(resolved_path, abs_file.resolve())
             self.assertEqual(rel_name, "absolute_asset.blend")

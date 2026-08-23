@@ -100,11 +100,6 @@ class SceneCache:
         index = self._load_index()
         key = self._make_key(s_key, request_hash)
         record = index.get(key)
-        if record is None and request_hash:
-            # Fallback to check legacy un-suffixed key ONLY if its request_hash strictly matches
-            fallback = index.get(s_key)
-            if fallback and fallback.get("request_hash") == request_hash:
-                record = fallback
 
         if record is None:
             return None
@@ -129,11 +124,10 @@ class SceneCache:
         entry.cached_at = entry.cached_at or time.time()
         index = self._load_index()
 
-        # Store keyed by specific request configuration as well as source
+        # Store keyed strictly by specific request configuration
         key = self._make_key(s_key, entry.request_hash)
         entry_dict = asdict(entry)
         index[key] = entry_dict
-        index[s_key] = entry_dict
 
         self._write_index(index)
 
