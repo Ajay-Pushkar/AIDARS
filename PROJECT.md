@@ -44,6 +44,12 @@ The project architecture for this scope consists of two decoupled subsystems:
 | F14 | `SceneEngine` M3 Visibility Integration | Direct `analyze_render_requirements()` and `SceneEngine.run(optimize_package_by_visibility=True)` returning typed report | M2 | Survey / R3 |
 | F15 | Complete Test Suite Verification (115 tests) | All 115 unit, facade, cache, visibility, and adversarial tests pass cleanly | M3 | Acceptance Criteria |
 | F16 | Adversarial Hardening & Forensic Integrity Audit | Adversarial verification of edge cases, zero cheating/hardcoding, CLEAN auditor verdict | M3 | Project Pattern |
+| F17 | `PackagePlanner` & Logical Packaging (M4-A) | Resolves rendering requirements and dependencies, performs asset deduplication, and generates a canonical schema v1.0 `PackagePlan`. | M4 | Implementation |
+| F18 | SHA-256 Hashing & Identity (M4-B) | Calculates deterministic cryptographic hashes for all packaged physical files, tracking exact filesystem dimensions and byte sizes. | M4 | Implementation |
+| F19 | `PackageBuilder` & Atomic Publication (M4-C) | Constructs the package via `O(B)` byte copying into a secure `tempfile.mkdtemp` space. Ensures thread-safe/process-safe publishing via a deterministic `.bak` atomic directory swap. | M4 | Implementation |
+| F20 | O(1) Blender Path Remapping (M4-C) | Injects headless Blender execution to seamlessly remap internal `.blend` absolute/relative paths using strict `O(1)` dictionary lookups. | M4 | Implementation |
+| F21 | `PackageValidator` & Contract Enforcement (M4-D) | Enforces the strict existence of the source `.blend` and executes a secondary validation layer inside headless Blender to verify path resolutions. Handles gracefully `FileNotFoundError`/`PermissionError` when environment fails. | M4 | Implementation |
+| F22 | M4 Test Suite & Algorithmic Adherence | 171 passing Python tests, plus an end-to-end real Blender smoke render test. Proven strictly within `O(V + E + A log A + B)` operational constraints. | M4 | Implementation |
 
 ---
 
