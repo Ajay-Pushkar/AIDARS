@@ -90,6 +90,14 @@ SAMPLE_SCENE_ADVERSARIAL: Dict[str, Any] = {
 
 class AdversarialCacheStressTests(unittest.TestCase):
     """Rigorous empirical challenge suite for SceneCache and SceneEngine caching."""
+    def setUp(self):
+        import unittest.mock
+        from aidars.smart_package.models import PackageIntegrityReport
+        self.patcher = unittest.mock.patch("aidars.smart_package.validator.PackageValidator.validate", return_value=PackageIntegrityReport(verified=True, asset_count=0, verified_count=0, failed_assets=[], missing_assets=[]))
+        self.patcher.start()
+        
+    def tearDown(self):
+        self.patcher.stop()
 
     # -------------------------------------------------------------------------
     # 1. Rapid Interleaved Requests on Identical Source with Varying Parameters

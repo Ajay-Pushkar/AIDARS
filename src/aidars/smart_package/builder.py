@@ -147,11 +147,12 @@ class PackageBuilder:
         atomically replaces the final output directory.
         """
         import os
+        import tempfile
         final_dir = Path(final_output_dir)
-        tmp_dir = final_dir.with_suffix(".tmp")
         
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir)
+        # Use a secure, non-colliding temporary directory in the same filesystem
+        tmp_dir_path = tempfile.mkdtemp(prefix="aidar_pkg_", dir=final_dir.parent if final_dir.parent.exists() else None)
+        tmp_dir = Path(tmp_dir_path)
             
         try:
             self.build_package(
@@ -170,8 +171,22 @@ class PackageBuilder:
             
             if report.verified:
                 if final_dir.exists():
-                    shutil.rmtree(final_dir)
-                os.replace(tmp_dir, final_dir)
+                    backup_dir = final_dir.with_name(f"{final_dir.name}.bak_{os.getpid()}")
+                    if backup_dir.exists():
+                        shutil.rmtree(backup_dir)
+                    # Rename existing to backup (fast)
+                    os.rename(final_dir, backup_dir)
+                    try:
+                        # Rename new to final (fast)
+                        os.rename(tmp_dir, final_dir)
+                    except Exception:
+                        # Rollback on failure
+                        os.rename(backup_dir, final_dir)
+                        raise
+                    # Cleanup backup
+                    shutil.rmtree(backup_dir)
+                else:
+                    os.rename(tmp_dir, final_dir)
             else:
                 raise RuntimeError(f"Package validation failed. Missing/failed assets: {report.failed_assets + report.missing_assets}")
                 
@@ -243,7 +258,7 @@ class PackageBuilder:
         if scene_source_path:
             scene_src = Path(scene_source_path)
             if scene_src.exists() and scene_src.suffix.lower() == ".blend":
-                scene_dst = dest_dir / "scene" / scene_src.name
+                scene_dst = dest_dir / "scene" / f"{plan.scene_name}.blend"
                 scene_dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(scene_src, scene_dst)
                 

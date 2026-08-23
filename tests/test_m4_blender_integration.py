@@ -118,7 +118,7 @@ bpy.ops.wm.save_as_mainfile(filepath=r"{source_blend.resolve().as_posix()}")
             self.assertIsNotNone(result.package_plan)
             self.assertTrue(result.package_output_path.exists())
             
-            pkg_blend = pkg_dir / "scene" / "source.blend"
+            pkg_blend = pkg_dir / "scene" / "Scene.blend"
             self.assertTrue(pkg_blend.exists(), "The packaged .blend should exist")
             
             manifest = json.loads(result.package_output_path.read_text(encoding="utf-8"))

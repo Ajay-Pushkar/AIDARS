@@ -439,6 +439,11 @@ class TestSchemaV1ManifestValidationAndReproducibility(unittest.TestCase):
         self.assertEqual(stats["resolved_assets"], 1)
         self.assertEqual(stats["missing_assets"], 1)
 
+        # Create dummy .blend file so validation succeeds
+        scene_dir = self.out_dir / "scene"
+        scene_dir.mkdir(parents=True, exist_ok=True)
+        (scene_dir / "DemoScene.blend").write_bytes(b"dummy")
+
         # Validate with PackageValidator
         report = self.validator.validate(plan, package_dir=self.out_dir)
         self.assertTrue(report.verified)

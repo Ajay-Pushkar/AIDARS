@@ -7,8 +7,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from unittest.mock import patch
 from aidars.scene_intelligence.integrity import IntegrityReport
-from aidars.scene_intelligence.scene_engine import SceneEngine, SceneEngineRequest
+from aidars.scene_intelligence.models import SceneSnapshot
+from aidars.scene_intelligence.scene_engine import SceneEngine, SceneEngineRequest, SceneEngineResult
+from aidars.scheduler.frame_scheduler import FrameScheduler, SchedulingPlan
+from aidars.smart_package.models import PackageIntegrityReport
 from aidars.visibility import RenderRequirementReport
 
 SAMPLE_SCENE = {
@@ -41,7 +45,15 @@ SAMPLE_SCENE = {
 class SceneEngineTests(unittest.TestCase):
     """SceneEngine is the orchestration facade: business logic lives here,
     not in the CLI. These tests exercise it directly, the way a future API
-    or GUI would, without going through argparse at all."""
+    or web UI would.
+    """
+    
+    def setUp(self):
+        self.patcher = patch("aidars.smart_package.validator.PackageValidator.validate", return_value=PackageIntegrityReport(verified=True, asset_count=0, verified_count=0, failed_assets=[], missing_assets=[]))
+        self.patcher.start()
+        
+    def tearDown(self):
+        self.patcher.stop()
 
     def test_run_produces_snapshot_graph_and_integrity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -79,31 +79,37 @@ class PackageValidator:
             and len(missing_assets) == 0
             and verified_count == asset_count
         )
+        
+        # Enforce that the authoritative .blend scene file exists
+        blend_file = pkg_path / "scene" / f"{plan.scene_name}.blend"
+        if not blend_file.exists():
+            verified = False
+            missing_assets.append(f"scene/{plan.scene_name}.blend")
 
         if verified and blender_executable:
-            # The packaged scene file is guaranteed to be named {plan.scene_name}.blend
-            # and located in the scene/ directory.
-            blend_file = pkg_path / "scene" / f"{plan.scene_name}.blend"
-            if blend_file.exists():
-                verify_script = Path(__file__).parent / "blender_scripts" / "verify_package.py"
-                import subprocess
-                try:
-                    res = subprocess.run(
-                        [
-                            blender_executable,
-                            "-b",
-                            str(blend_file),
-                            "-P",
-                            str(verify_script),
-                        ],
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                    )
-                except subprocess.CalledProcessError as e:
-                    # Blender verification failed
-                    verified = False
-                    failed_assets.append("blender_asset_resolution_failed")
+            verify_script = Path(__file__).parent / "blender_scripts" / "verify_package.py"
+            import subprocess
+            try:
+                res = subprocess.run(
+                    [
+                        blender_executable,
+                        "-b",
+                        str(blend_file),
+                        "-P",
+                        str(verify_script),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as e:
+                # Blender verification failed
+                verified = False
+                failed_assets.append("blender_asset_resolution_failed")
+            except (FileNotFoundError, PermissionError) as e:
+                # Blender executable is unavailable or inaccessible
+                verified = False
+                failed_assets.append(f"blender_executable_unavailable: {e}")
 
         return PackageIntegrityReport(
             verified=verified,
