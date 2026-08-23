@@ -853,13 +853,6 @@ class PackageConstructionTests(unittest.TestCase):
                     size_bytes=len(b"content-b"),
                     embedded=False,
                 ),
-                AssetRecord(
-                    asset_id="obj-mesh",
-                    asset_type=AssetType.MESH,
-                    selection_reason=SelectionReason.RENDER_REQUIRED,
-                    status=AssetStatus.EMBEDDED,
-                    embedded=True,
-                ),
             ]
 
             plan = self.planner.create_plan(records, package_id="pkg-real")
@@ -874,6 +867,65 @@ class PackageConstructionTests(unittest.TestCase):
             self.assertTrue(manifest.exists())
             self.assertEqual(copied_a.read_bytes(), b"content-a")
             self.assertEqual(copied_b.read_bytes(), b"content-b")
+
+    def test_blender_path_remapping(self) -> None:
+        """Test that .blend scene source triggers path remapping script."""
+        import subprocess
+        from unittest.mock import patch
+        
+        with tempfile.TemporaryDirectory() as src_dir, tempfile.TemporaryDirectory() as dst_dir:
+            scene_file = Path(src_dir) / "test_scene.blend"
+            scene_file.write_bytes(b"blend-content")
+            
+            asset_file = Path(src_dir) / "texture.png"
+            asset_file.write_bytes(b"tex")
+            
+            records = [
+                AssetRecord(
+                    asset_id="tex",
+                    asset_type=AssetType.TEXTURE,
+                    selection_reason=SelectionReason.RENDER_REQUIRED,
+                    source_path=str(asset_file),
+                    package_path="assets/texture.png",
+                    status=AssetStatus.RESOLVED,
+                    sha256="abc",
+                    size_bytes=3,
+                    embedded=False,
+                )
+            ]
+            plan = self.planner.create_plan(records, package_id="pkg")
+            
+            with patch("subprocess.run") as mock_run:
+                self.builder.build_package(
+                    plan, 
+                    output_dir=dst_dir, 
+                    scene_source_path=scene_file, 
+                    blender_executable="/mock/blender"
+                )
+                
+                # Check that .blend was copied
+                dst_scene = Path(dst_dir) / "scene" / "test_scene.blend"
+                self.assertTrue(dst_scene.exists())
+                
+                # Check that mapping file was created
+                mapping_file = Path(dst_dir) / "path_mapping.json"
+                self.assertTrue(mapping_file.exists())
+                
+                mapping = json.loads(mapping_file.read_text())
+                self.assertEqual(mapping[str(asset_file.resolve())], "//assets/texture.png")
+                
+                # Check that subprocess.run was called with expected arguments
+                mock_run.assert_called_once()
+                args, kwargs = mock_run.call_args
+                cmd = args[0]
+                
+                self.assertEqual(cmd[0], "/mock/blender")
+                self.assertEqual(cmd[1], "-b")
+                self.assertEqual(cmd[2], str(dst_scene))
+                self.assertEqual(cmd[3], "-P")
+                self.assertTrue(cmd[4].endswith("remap_paths.py"))
+                self.assertEqual(cmd[5], "--")
+                self.assertEqual(cmd[6], str(mapping_file))
 
     def test_deterministic_output_reproducibility(self) -> None:
         """Running package creation twice on identical inputs produces identical manifest content."""

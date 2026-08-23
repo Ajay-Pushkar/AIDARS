@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
@@ -17,6 +19,7 @@ from .optimizer import AssetOptimizer
 if TYPE_CHECKING:
     from aidars.scene_intelligence.dependency_graph import DependencyGraph
 
+logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class PackageAsset:
@@ -266,6 +269,8 @@ class PackageBuilder:
         plan: PackagePlan,
         output_dir: Union[str, Path],
         dry_run: bool = False,
+        scene_source_path: Optional[Union[str, Path]] = None,
+        blender_executable: Optional[str] = None,
     ) -> Path:
         """Construct the package directory and serialize manifest.json.
 
@@ -273,6 +278,8 @@ class PackageBuilder:
             plan: The PackagePlan containing all asset and metadata specifications.
             output_dir: Directory where package assets and manifest will be written.
             dry_run: If True, simulate operations without copying files or writing manifest.
+            scene_source_path: The original scene file path (e.g. .blend file).
+            blender_executable: Optional path to blender executable for remapping paths.
 
         Returns:
             Path to the written manifest.json (or expected path if dry_run).
@@ -285,6 +292,9 @@ class PackageBuilder:
 
         dest_dir.mkdir(parents=True, exist_ok=True)
 
+        # Build mapping for remapping script
+        mapping = {}
+
         # Copy deduplicated physical files
         for record in plan.deduplicated_assets:
             if (
@@ -295,10 +305,47 @@ class PackageBuilder:
                 src = Path(record.source_path)
                 dst = dest_dir / record.package_path
                 dst.parent.mkdir(parents=True, exist_ok=True)
+                mapping[str(src.resolve())] = "//" + record.package_path
                 if src.exists() and src.is_file():
                     shutil.copy2(src.resolve(), dst)
                     if dst.is_symlink():
                         raise RuntimeError(f"Symlink copied instead of file content: {dst}")
+
+        if scene_source_path:
+            scene_src = Path(scene_source_path)
+            if scene_src.exists() and scene_src.suffix.lower() == ".blend":
+                scene_dst = dest_dir / "scene" / scene_src.name
+                scene_dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(scene_src, scene_dst)
+                
+                if blender_executable:
+                    remap_script = Path(__file__).parent / "blender_scripts" / "remap_paths.py"
+                    mapping_file = dest_dir / "path_mapping.json"
+                    mapping_file.write_text(json.dumps(mapping, indent=2))
+                    
+                    try:
+                        subprocess.run(
+                            [
+                                blender_executable,
+                                "-b",
+                                str(scene_dst),
+                                "-P",
+                                str(remap_script),
+                                "--",
+                                str(mapping_file),
+                            ],
+                            check=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                    except subprocess.CalledProcessError as e:
+                        logger.warning(
+                            f"Blender path remapping failed for {scene_dst.name}: {e.stderr.decode()}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to execute blender path remapping: {e}"
+                        )
 
         # Write schema v1.0 manifest JSON with deterministic formatting
         manifest_dict = plan.to_dict()

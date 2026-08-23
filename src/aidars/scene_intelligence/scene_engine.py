@@ -217,7 +217,12 @@ class SceneEngine:
                 tmp_dir = pkg_dir.with_suffix('.tmp')
 
                 # Construct physical package and manifest
-                self.m4_package_builder.build_package(plan, output_dir=tmp_dir)
+                self.m4_package_builder.build_package(
+                    plan,
+                    output_dir=tmp_dir,
+                    scene_source_path=request.input_path,
+                    blender_executable=request.blender_executable,
+                )
 
                 # Stage M4-D: Post-Copy Validation
                 result.package_integrity = self.package_validator.validate(plan, package_dir=tmp_dir)
