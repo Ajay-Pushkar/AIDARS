@@ -220,13 +220,13 @@ class PackageBuilder:
                             stderr=subprocess.PIPE,
                         )
                     except subprocess.CalledProcessError as e:
-                        logger.warning(
-                            f"Blender path remapping failed for {scene_dst.name}: {e.stderr.decode()}"
-                        )
+                        raise RuntimeError(
+                            f"Blender path remapping failed for {scene_dst.name}: {e.stderr.decode('utf-8', errors='replace')}"
+                        ) from e
                     except Exception as e:
-                        logger.warning(
+                        raise RuntimeError(
                             f"Failed to execute blender path remapping: {e}"
-                        )
+                        ) from e
 
         # Write schema v1.0 manifest JSON with deterministic formatting
         manifest_dict = plan.to_dict()

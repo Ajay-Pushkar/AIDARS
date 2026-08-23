@@ -221,7 +221,11 @@ class SceneEngine:
                     scene_source_path=request.input_path,
                     blender_executable=request.blender_executable or getattr(self, "_blender_executable", None),
                 )
-                result.package_integrity = self.package_validator.validate(plan, package_dir=tmp_dir)
+                result.package_integrity = self.package_validator.validate(
+                    plan,
+                    package_dir=tmp_dir,
+                    blender_executable=request.blender_executable or getattr(self, "_blender_executable", None),
+                )
                 
                 if result.package_integrity.verified:
                     if pkg_dir.exists():

@@ -31,12 +31,16 @@ class PackageValidator:
         self,
         plan: PackagePlan,
         package_dir: Union[str, Path],
+        blender_executable: str | None = None,
     ) -> PackageIntegrityReport:
         """Verify that every packaged asset exists and its SHA-256 matches the plan.
+        If a blender_executable is provided, also verify that the packaged .blend
+        file correctly resolves all its external asset references.
 
         Args:
             plan: The PackagePlan containing expected assets.
             package_dir: Root directory of the constructed package.
+            blender_executable: Optional path to blender.
 
         Returns:
             PackageIntegrityReport with verified=True iff all assets exist and match hashes.
@@ -75,6 +79,33 @@ class PackageValidator:
             and len(missing_assets) == 0
             and verified_count == asset_count
         )
+
+        if verified and blender_executable:
+            # Find the .blend file in the scene/ directory
+            scene_dir = pkg_path / "scene"
+            if scene_dir.exists():
+                blend_files = list(scene_dir.glob("*.blend"))
+                if blend_files:
+                    blend_file = blend_files[0]
+                    verify_script = Path(__file__).parent / "blender_scripts" / "verify_package.py"
+                    import subprocess
+                    try:
+                        res = subprocess.run(
+                            [
+                                blender_executable,
+                                "-b",
+                                str(blend_file),
+                                "-P",
+                                str(verify_script),
+                            ],
+                            check=True,
+                            capture_output=True,
+                            text=True,
+                        )
+                    except subprocess.CalledProcessError as e:
+                        # Blender verification failed
+                        verified = False
+                        failed_assets.append("blender_asset_resolution_failed")
 
         return PackageIntegrityReport(
             verified=verified,
