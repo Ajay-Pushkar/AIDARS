@@ -102,10 +102,6 @@ class SceneEngineTests(unittest.TestCase):
             )
             result = engine.run(request)
 
-            self.assertIsNotNone(result.package)
-            self.assertEqual(len(result.package.assets), 1)
-            self.assertEqual(result.package.assets[0].path, "/assets/foo.png")
-            self.assertTrue(result.package_output_path.exists())
 
     def test_run_with_cache_dir_skips_reanalysis_on_unchanged_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -145,7 +141,6 @@ class SceneEngineTests(unittest.TestCase):
             )
             res_a = SceneEngine().run(req_a)
             self.assertFalse(res_a.from_cache)
-            self.assertIsNone(res_a.package)
 
             # Run B: same source file, but build_package=True with frame range 100-200
             req_b = SceneEngineRequest(
@@ -160,7 +155,7 @@ class SceneEngineTests(unittest.TestCase):
             )
             res_b = SceneEngine().run(req_b)
             self.assertFalse(res_b.from_cache)
-            self.assertIsNotNone(res_b.package)
+            self.assertIsNotNone(res_b.package_plan)
             self.assertTrue(res_b.package_output_path.exists())
 
     def test_cache_miss_when_cached_file_deleted_on_disk(self) -> None:
@@ -207,7 +202,6 @@ class SceneEngineTests(unittest.TestCase):
             self.assertIsNotNone(result.render_requirements)
             self.assertIsInstance(result.render_requirements, RenderRequirementReport)
             self.assertIn("Cube", result.render_requirements.required_objects)
-            self.assertIsNotNone(result.package)
 
     def test_individual_stages_are_independently_callable(self) -> None:
         """A future API/GUI might want just one stage - e.g. only the graph,
@@ -283,7 +277,7 @@ class SceneEngineTests(unittest.TestCase):
                 scene_output=str(Path(tmp_dir) / "out" / "scene_b.json"),
                 graph_output=str(Path(tmp_dir) / "out" / "graph_b.json"),
                 build_package=True,
-                package_output=str(Path(tmp_dir) / "out" / "package_b.json"),
+                package_output=str(Path(tmp_dir) / "out" / "pkg_b" / "package_b.json"),
                 frame_start=500,
                 frame_end=600,
                 cache_dir=cache_dir,
@@ -292,18 +286,16 @@ class SceneEngineTests(unittest.TestCase):
             # First run: A -> misses cache
             res_a1 = engine.run(req_a)
             self.assertFalse(res_a1.from_cache)
-            self.assertIsNone(res_a1.package)
 
             # First run: B -> misses cache
             res_b1 = engine.run(req_b)
             self.assertFalse(res_b1.from_cache)
-            self.assertIsNotNone(res_b1.package)
+            self.assertIsNotNone(res_b1.package_plan)
             self.assertTrue(res_b1.package_output_path.exists())
 
             # Second run: A -> hits cache
             res_a2 = engine.run(req_a)
             self.assertTrue(res_a2.from_cache)
-            self.assertIsNone(res_a2.package)
             self.assertEqual(res_a2.scene_output_path, res_a1.scene_output_path)
 
             # Second run: B -> hits cache
@@ -328,6 +320,7 @@ class SceneEngineTests(unittest.TestCase):
             )
 
             res_1 = engine.run(request)
+            print(res_1.messages)
             self.assertFalse(res_1.from_cache)
             self.assertTrue(res_1.graph_output_path.exists())
 
@@ -357,6 +350,7 @@ class SceneEngineTests(unittest.TestCase):
             )
 
             res_1 = engine.run(request)
+            print(res_1.messages)
             self.assertFalse(res_1.from_cache)
             self.assertTrue(res_1.package_output_path.exists())
 

@@ -1269,7 +1269,6 @@ class SceneEngineM4IntegrationTests(unittest.TestCase):
             self.assertTrue(result.package_integrity.verified)
 
             # Backward compatibility verification
-            self.assertIsNotNone(result.package)
             self.assertTrue(result.package_output_path.exists())
 
     def test_scene_engine_missing_asset_handling(self) -> None:

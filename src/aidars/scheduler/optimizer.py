@@ -30,11 +30,19 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Set
+from typing import TYPE_CHECKING, Dict, List, Set, Optional
 
 if TYPE_CHECKING:
     from aidars.scene_intelligence.dependency_graph import DependencyGraph
-    from aidars.smart_package.builder import PackageAsset
+
+@dataclass(slots=True)
+class PackageAsset:
+    """Legacy/scheduler representation of a required asset."""
+    path: str
+    kind: str
+    size_bytes: int = 0
+    frame_start: Optional[int] = None
+    frame_end: Optional[int] = None
 
 
 @dataclass(slots=True)

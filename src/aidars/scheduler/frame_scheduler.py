@@ -30,13 +30,13 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List
 
-from aidars.smart_package.optimizer import AssetOptimizer
+from aidars.scheduler.optimizer import AssetOptimizer, PackageAsset
 from aidars.visibility.engine import VisibilityAnalyzer
 
 if TYPE_CHECKING:
     from aidars.scene_intelligence.dependency_graph import DependencyGraph
     from aidars.scene_intelligence.models import SceneSnapshot
-    from aidars.smart_package.builder import PackageAsset
+    
 
 
 @dataclass(slots=True)

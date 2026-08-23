@@ -22,12 +22,10 @@ from .integrity import IntegrityChecker, IntegrityReport
 from .models import SceneData, SceneSnapshot
 from aidars.scheduler.frame_scheduler import FrameScheduler, SchedulingPlan
 from aidars.smart_package.builder import (
-    PackageAsset,
     PackageBuilder,
-    PackageManifest,
     PackagePlanner,
-    SmartPackageBuilder,
 )
+from aidars.scheduler.optimizer import PackageAsset
 from aidars.smart_package.models import PackageIntegrityReport, PackagePlan
 from aidars.smart_package.resolver import (
     DependencyClosureResolver,
@@ -89,7 +87,6 @@ class SceneEngineResult:
     integrity: Optional[IntegrityReport] = None
     visibility: Optional[VisibilityReport] = None
     render_requirements: Optional[RenderRequirementReport] = None
-    package: Optional[PackageManifest] = None
     package_plan: Optional[PackagePlan] = None
     package_integrity: Optional[PackageIntegrityReport] = None
     scene_output_path: Optional[Path] = None
@@ -109,7 +106,6 @@ class SceneEngine:
         self.integrity_checker = IntegrityChecker()
         self.visibility_analyzer = VisibilityAnalyzer()
         self.render_requirement_analyzer = RenderRequirementAnalyzer()
-        self.package_builder = SmartPackageBuilder()
         self.m4_package_planner = PackagePlanner()
         self.m4_package_builder = PackageBuilder(planner=self.m4_package_planner)
         self.physical_resolver = PhysicalAssetResolver()
@@ -159,8 +155,8 @@ class SceneEngine:
             result.warnings.extend(self._format_integrity_warnings(result.integrity))
 
         if request.build_package:
+            graph_for_packaging = result.graph or self.build_dependency_graph(result.snapshot)
             if request.optimize_package_by_visibility:
-                graph_for_packaging = result.graph or self.build_dependency_graph(result.snapshot)
                 render_req = RenderRequest(
                     camera_id=request.camera_id,
                     frame_start=request.frame_start,
@@ -173,79 +169,71 @@ class SceneEngine:
                 )
                 result.render_requirements = req_report
                 result.visibility = self.analyze_visibility(result.snapshot, request.frame_start, request.frame_end)
-
-                # Prune to objects identified as required by the full M3 render requirement analysis
+    
                 required_object_ids = set(req_report.required_objects)
                 result.messages.append(
                     f"Render requirement analysis: {len(required_object_ids)} object(s) required "
                     f"in frames {request.frame_start}-{request.frame_end}"
                 )
-
-                # M4 Smart Packaging Pipeline (M4-A -> M4-B -> M4-C -> M4-D)
-                # Stage M4-A: Requirement & Closure resolution
+    
                 seed_ids = RequirementResolver.resolve(req_report)
-                closure_ids = DependencyClosureResolver.compute_closure(seed_ids, graph_for_packaging)
+            else:
+                seed_ids = {node.identifier for node in graph_for_packaging.nodes}
 
-                # Base directory for physical resolution
-                input_p = Path(request.input_path) if request.input_path else Path.cwd()
-                base_dir = input_p.parent if input_p.exists() and input_p.is_file() else Path.cwd()
-
-                # Stage M4-B: Physical Asset Resolution
-                asset_records = self.physical_resolver.resolve(
-                    closure_ids=closure_ids,
-                    graph=graph_for_packaging,
-                    base_dir=base_dir,
-                    seed_ids=seed_ids,
-                    snapshot=result.snapshot,
-                )
-
-                # Stage M4-C: Package Planning & Construction
-                pkg_id = hashlib.sha256(request.fingerprint().encode()).hexdigest()[:12]
-                scene_name = result.snapshot.metadata.name if result.snapshot and result.snapshot.metadata else "scene"
-                plan = self.m4_package_planner.create_plan(
-                    asset_records=asset_records,
-                    package_id=pkg_id,
-                    scene_name=scene_name,
-                    camera=request.camera_id,
-                    frame_start=request.frame_start,
-                    frame_end=request.frame_end,
-                )
-                result.package_plan = plan
-
-                pkg_out_p = Path(request.package_output)
-                pkg_dir = pkg_out_p.parent if pkg_out_p.suffix else pkg_out_p
-                tmp_dir = pkg_dir.with_suffix('.tmp')
-
-                # Construct physical package and manifest
+            closure_ids = DependencyClosureResolver.compute_closure(seed_ids, graph_for_packaging)
+            
+            input_p = Path(request.input_path) if request.input_path else Path.cwd()
+            base_dir = input_p.parent if input_p.exists() and input_p.is_file() else Path.cwd()
+            
+            asset_records = self.physical_resolver.resolve(
+                closure_ids=closure_ids,
+                graph=graph_for_packaging,
+                base_dir=base_dir,
+                seed_ids=seed_ids,
+                snapshot=result.snapshot,
+            )
+            
+            pkg_id = hashlib.sha256(request.fingerprint().encode()).hexdigest()[:12]
+            scene_name = result.snapshot.metadata.name if result.snapshot and result.snapshot.metadata else "scene"
+            plan = self.m4_package_planner.create_plan(
+                asset_records=asset_records,
+                package_id=pkg_id,
+                scene_name=scene_name,
+                camera=request.camera_id,
+                frame_start=request.frame_start,
+                frame_end=request.frame_end,
+            )
+            result.package_plan = plan
+            
+            pkg_out_p = Path(request.package_output)
+            pkg_dir = pkg_out_p.parent if pkg_out_p.suffix else pkg_out_p
+            
+            import os
+            import shutil
+            tmp_dir = pkg_dir.with_suffix('.tmp')
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir)
+                
+            try:
                 self.m4_package_builder.build_package(
                     plan,
                     output_dir=tmp_dir,
                     scene_source_path=request.input_path,
                     blender_executable=request.blender_executable,
                 )
-
-                # Stage M4-D: Post-Copy Validation
                 result.package_integrity = self.package_validator.validate(plan, package_dir=tmp_dir)
                 
                 if result.package_integrity.verified:
-                    import os
-                    import shutil
                     if pkg_dir.exists():
                         shutil.rmtree(pkg_dir)
                     os.replace(tmp_dir, pkg_dir)
-
-                # Legacy compatibility: build_optimized_package and result.package
-                result.package = self.build_optimized_package(
-                    payload,
-                    request.frame_start,
-                    request.frame_end,
-                    graph_for_packaging,
-                    required_object_ids,
-                )
-            else:
-                result.package = self.build_package(payload, request.frame_start, request.frame_end)
-            result.package_output_path = self.package_builder.write_manifest(result.package, request.package_output)
-            result.messages.append(f"Package manifest written to {result.package_output_path}")
+                    result.package_output_path = pkg_dir / "manifest.json"
+                    result.messages.append(f"Physical package created at {pkg_dir}")
+                else:
+                    raise RuntimeError(f"Package validation failed. Failed assets: {[a.asset_id for a in result.package_integrity.failed_assets]}")
+            finally:
+                if tmp_dir.exists():
+                    shutil.rmtree(tmp_dir)
 
         if cache is not None and source_hash is not None:
             cache.put(
@@ -321,28 +309,6 @@ class SceneEngine:
             active_camera=active_camera,
             render_settings=render_settings,
         )
-
-    def build_package(
-        self,
-        source: dict[str, Any] | SceneData,
-        frame_start: int,
-        frame_end: int,
-    ) -> PackageManifest:
-        """Build a smart packaging manifest for the given frame range."""
-        assets = self._extract_raw_assets(source)
-        return self.package_builder.build_package(frame_start, frame_end, assets)
-
-    def build_optimized_package(
-        self,
-        source: dict[str, Any] | SceneData,
-        frame_start: int,
-        frame_end: int,
-        graph: DependencyGraph,
-        visible_object_ids: Set[str],
-    ) -> PackageManifest:
-        """Build a packaging manifest pruned to assets reachable from required objects."""
-        assets = self._extract_raw_assets(source)
-        return self.package_builder.build_optimized_package(frame_start, frame_end, assets, graph, visible_object_ids)
 
     def build_scheduling_plan(
         self,

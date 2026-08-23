@@ -1,11 +1,8 @@
 """Smart package builder and M4 smart packaging pipeline."""
 
 from .builder import (
-    PackageAsset,
     PackageBuilder,
-    PackageManifest,
     PackagePlanner,
-    SmartPackageBuilder,
 )
 from .models import (
     AssetRecord,
@@ -16,7 +13,6 @@ from .models import (
     PackageStatistics,
     SelectionReason,
 )
-from .optimizer import AssetOptimizer, OptimizationResult
 from .resolver import (
     DependencyClosureResolver,
     PhysicalAssetResolver,
@@ -25,16 +21,13 @@ from .resolver import (
 from .validator import PackageValidator
 
 __all__ = [
-    "AssetOptimizer",
     "AssetRecord",
     "AssetStatus",
     "AssetType",
     "DependencyClosureResolver",
     "OptimizationResult",
-    "PackageAsset",
     "PackageBuilder",
     "PackageIntegrityReport",
-    "PackageManifest",
     "PackagePlan",
     "PackagePlanner",
     "PackageStatistics",
@@ -42,5 +35,4 @@ __all__ = [
     "PhysicalAssetResolver",
     "RequirementResolver",
     "SelectionReason",
-    "SmartPackageBuilder",
 ]

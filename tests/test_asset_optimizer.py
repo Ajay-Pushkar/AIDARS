@@ -6,8 +6,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from aidars.scene_intelligence.dependency_graph import DependencyGraphBuilder
 from aidars.scene_intelligence.engine import SceneIntelligenceEngine
-from aidars.smart_package.builder import PackageAsset
-from aidars.smart_package.optimizer import AssetOptimizer
+
+from aidars.scheduler.optimizer import AssetOptimizer, OptimizationResult, PackageAsset
 
 BASE_SCENE = {
     "metadata": {"name": "Demo", "frame_start": 1, "frame_end": 24, "fps": 24},
