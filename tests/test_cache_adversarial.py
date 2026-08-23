@@ -124,7 +124,7 @@ class AdversarialCacheStressTests(unittest.TestCase):
                                 input_path=str(scene_file),
                                 scene_output=str(out_dir / "scene.json"),
                                 graph_output=str(out_dir / "graph.json"),
-                                package_output=str(out_dir / "package.json"),
+                                package_output=str(out_dir / "pkg" / "package.json"),
                                 build_graph=build_graph,
                                 build_package=build_package,
                                 optimize_package_by_visibility=(build_package and bool(camera_id)),

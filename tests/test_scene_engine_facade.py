@@ -416,7 +416,7 @@ class SceneEngineTests(unittest.TestCase):
                 scene_output=str(Path(tmp_dir) / "out" / "scene.json"),
                 graph_output=str(Path(tmp_dir) / "out" / "graph.json"),
                 build_package=True,
-                package_output=str(Path(tmp_dir) / "out" / "package.json"),
+                package_output=str(Path(tmp_dir) / "out" / "pkg" / "package.json"),
                 optimize_package_by_visibility=False,
                 cache_dir=cache_dir,
             )
@@ -425,7 +425,7 @@ class SceneEngineTests(unittest.TestCase):
                 scene_output=str(Path(tmp_dir) / "out" / "scene.json"),
                 graph_output=str(Path(tmp_dir) / "out" / "graph.json"),
                 build_package=True,
-                package_output=str(Path(tmp_dir) / "out" / "package.json"),
+                package_output=str(Path(tmp_dir) / "out" / "pkg" / "package.json"),
                 optimize_package_by_visibility=True,
                 cache_dir=cache_dir,
             )

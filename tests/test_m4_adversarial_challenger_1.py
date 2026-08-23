@@ -76,7 +76,7 @@ class TestPhysicalAssetResolverAdversarialPathEdgeCases(unittest.TestCase):
         records = self.resolver.resolve({"image:deep"}, graph, base_dir=self.base_path)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].status, AssetStatus.RESOLVED)
-        self.assertEqual(records[0].package_path, "assets/deep_texture.png")
+        self.assertTrue(records[0].package_path.endswith("_deep_texture.png"))
         self.assertEqual(records[0].size_bytes, len(b"deep-texture-data-12345"))
 
     def test_relative_parent_directory_traversal(self) -> None:

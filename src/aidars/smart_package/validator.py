@@ -55,8 +55,13 @@ class PackageValidator:
         asset_count = len(target_records)
 
         for record in target_records:
-            dest_file = pkg_path / record.package_path
-            if not dest_file.exists() or not dest_file.is_file():
+            try:
+                dest_file = (pkg_path / record.package_path).resolve()
+            except Exception:
+                missing_assets.append(record.asset_id)
+                continue
+            
+            if not dest_file.is_relative_to(pkg_path.resolve()) or not dest_file.exists() or not dest_file.is_file():
                 missing_assets.append(record.asset_id)
             else:
                 actual_hash = self.compute_sha256(dest_file)
@@ -123,8 +128,13 @@ class PackageValidator:
         asset_count = len(unique_targets)
 
         for a in unique_targets:
-            dest_file = package_dir / a["package_path"]
-            if not dest_file.exists() or not dest_file.is_file():
+            try:
+                dest_file = (package_dir / a["package_path"]).resolve()
+            except Exception:
+                missing_assets.append(a["asset_id"])
+                continue
+            
+            if not dest_file.is_relative_to(package_dir.resolve()) or not dest_file.exists() or not dest_file.is_file():
                 missing_assets.append(a["asset_id"])
             else:
                 actual_hash = self.compute_sha256(dest_file)

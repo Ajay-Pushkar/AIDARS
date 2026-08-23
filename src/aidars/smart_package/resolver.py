@@ -462,7 +462,7 @@ class PhysicalAssetResolver:
                 if resolved_file.exists() and resolved_file.is_file():
                     file_size = resolved_file.stat().st_size
                     file_hash = self.compute_sha256(resolved_file)
-                    package_path = f"assets/{resolved_file.name}"
+                    package_path = f"assets/{file_hash[:8]}_{resolved_file.name}"
 
                     records.append(
                         AssetRecord(

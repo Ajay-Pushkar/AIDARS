@@ -573,7 +573,7 @@ class PhysicalAssetResolverTests(unittest.TestCase):
             self.assertEqual(rec.selection_reason, SelectionReason.RENDER_REQUIRED)
             self.assertEqual(rec.sha256, expected_hash)
             self.assertEqual(rec.size_bytes, len(tex_content))
-            self.assertEqual(rec.package_path, "assets/wood.png")
+            self.assertTrue(rec.package_path.endswith("_wood.png"))
             self.assertEqual(rec.source_path, str(tex_file.resolve()))
 
     def test_missing_file_flagged_as_missing(self) -> None:
@@ -676,6 +676,41 @@ class PhysicalAssetResolverTests(unittest.TestCase):
             self.assertTrue(expected_keys.issubset(d.keys()))
             self.assertEqual(d["type"], "image")
             self.assertEqual(d["status"], "resolved")
+
+    def test_duplicate_basename_collision_prevention(self) -> None:
+        """Files with same name but different content should get unique package paths."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            dir1 = base_dir / "A"
+            dir2 = base_dir / "B"
+            dir1.mkdir()
+            dir2.mkdir()
+            
+            file1 = dir1 / "texture.png"
+            file2 = dir2 / "texture.png"
+            file1.write_bytes(b"content-a")
+            file2.write_bytes(b"content-b")
+            
+            graph = DependencyGraph(
+                nodes=[
+                    GraphNode("texture:A/texture.png", "A/texture.png", "texture"),
+                    GraphNode("texture:B/texture.png", "B/texture.png", "texture"),
+                ],
+                edges=[]
+            )
+            
+            records = self.resolver.resolve(
+                closure_ids={"texture:A/texture.png", "texture:B/texture.png"},
+                graph=graph,
+                base_dir=base_dir,
+            )
+            
+            self.assertEqual(len(records), 2)
+            path1 = records[0].package_path
+            path2 = records[1].package_path
+            self.assertNotEqual(path1, path2)
+            self.assertTrue(path1.startswith("assets/"))
+            self.assertTrue(path2.startswith("assets/"))
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -887,6 +922,46 @@ class PackageConstructionTests(unittest.TestCase):
         self.assertEqual(plan.missing_assets[0].asset_id, "missing.png")
         self.assertEqual(plan.statistics.missing_assets, 1)
 
+    def test_symlink_escape_prevention(self) -> None:
+        """Symlinks should be resolved and their contents copied, not copied as symlinks."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            src_dir = base / "src"
+            pkg_dir = base / "pkg"
+            src_dir.mkdir()
+            
+            real_file = src_dir / "real.txt"
+            real_file.write_text("secret content")
+            
+            link_file = src_dir / "link.txt"
+            try:
+                os.symlink(real_file, link_file)
+            except OSError:
+                # Symlinks might not be supported/permitted on Windows without admin,
+                # skip test if we cannot create one.
+                return
+                
+            records = [
+                AssetRecord(
+                    asset_id="linked", 
+                    asset_type=AssetType.TEXTURE, 
+                    selection_reason=SelectionReason.DEPENDENCY, 
+                    status=AssetStatus.RESOLVED, 
+                    sha256="hash", 
+                    size_bytes=100, 
+                    embedded=False, 
+                    package_path="assets/link.txt",
+                    source_path=str(link_file)
+                )
+            ]
+            plan = self.planner.create_plan(records, package_id="pkg-link")
+            self.builder.build_package(plan, output_dir=pkg_dir)
+            
+            dst_file = pkg_dir / "assets/link.txt"
+            self.assertTrue(dst_file.exists())
+            self.assertFalse(dst_file.is_symlink())
+            self.assertEqual(dst_file.read_text(), "secret content")
+
 
 # ──────────────────────────────────────────────────────────────────
 # M4-D Unit Tests (Post-Copy Validation)
@@ -1039,6 +1114,59 @@ class PackageValidatorTests(unittest.TestCase):
             self.assertTrue(report.verified)
             self.assertEqual(report.verified_count, 1)
 
+    def test_path_traversal_prevention_in_validate(self) -> None:
+        """Path traversal in package_path should be caught and marked as missing."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pkg_dir = Path(tmp_dir) / "pkg"
+            pkg_dir.mkdir()
+            
+            plan = PackagePlan(
+                package_id="pkg-val",
+                scene_name="Demo",
+                camera="",
+                frame_start=1,
+                frame_end=24,
+                deduplicated_assets=[
+                    AssetRecord(
+                        asset_id="texture:tex1.png",
+                        asset_type=AssetType.TEXTURE,
+                        selection_reason=SelectionReason.RENDER_REQUIRED,
+                        package_path="../outside.png",
+                        status=AssetStatus.RESOLVED,
+                        sha256="expectedhash",
+                        size_bytes=100,
+                        embedded=False,
+                    )
+                ],
+            )
+            report = self.validator.validate(plan, package_dir=pkg_dir)
+            self.assertFalse(report.verified)
+            self.assertIn("texture:tex1.png", report.missing_assets)
+
+    def test_path_traversal_prevention_in_validate_manifest(self) -> None:
+        """Path traversal in manifest file should be caught."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pkg_dir = Path(tmp_dir) / "pkg"
+            pkg_dir.mkdir()
+            manifest_file = pkg_dir / "manifest.json"
+            manifest_content = {
+                "schema_version": "1.0",
+                "package_id": "pkg-test",
+                "assets": [
+                    {
+                        "asset_id": "tex-1",
+                        "status": "resolved",
+                        "package_path": "../outside.png",
+                        "sha256": "expectedhash",
+                        "embedded": False,
+                    }
+                ],
+            }
+            manifest_file.write_text(json.dumps(manifest_content), encoding="utf-8")
+            report = self.validator.validate_manifest(manifest_file)
+            self.assertFalse(report.verified)
+            self.assertIn("tex-1", report.missing_assets)
+
 
 # ──────────────────────────────────────────────────────────────────
 # SceneEngine M4 Integration Tests
@@ -1079,7 +1207,7 @@ class SceneEngineM4IntegrationTests(unittest.TestCase):
             # M4 stage verification
             self.assertIsNotNone(result.package_plan)
             self.assertIsInstance(result.package_plan, PackagePlan)
-            self.assertEqual(result.package_plan.package_id, "pkg-1-24")
+            self.assertEqual(len(result.package_plan.package_id), 12)
             self.assertGreater(len(result.package_plan.all_assets), 0)
             self.assertIsNotNone(result.package_plan.statistics)
 

@@ -296,7 +296,9 @@ class PackageBuilder:
                 dst = dest_dir / record.package_path
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 if src.exists() and src.is_file():
-                    shutil.copy2(src, dst)
+                    shutil.copy2(src.resolve(), dst)
+                    if dst.is_symlink():
+                        raise RuntimeError(f"Symlink copied instead of file content: {dst}")
 
         # Write schema v1.0 manifest JSON with deterministic formatting
         manifest_dict = plan.to_dict()

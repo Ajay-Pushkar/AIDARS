@@ -200,7 +200,7 @@ class SceneEngine:
                 )
 
                 # Stage M4-C: Package Planning & Construction
-                pkg_id = f"pkg-{request.frame_start}-{request.frame_end}"
+                pkg_id = hashlib.sha256(request.fingerprint().encode()).hexdigest()[:12]
                 scene_name = result.snapshot.metadata.name if result.snapshot and result.snapshot.metadata else "scene"
                 plan = self.m4_package_planner.create_plan(
                     asset_records=asset_records,
@@ -214,12 +214,20 @@ class SceneEngine:
 
                 pkg_out_p = Path(request.package_output)
                 pkg_dir = pkg_out_p.parent if pkg_out_p.suffix else pkg_out_p
+                tmp_dir = pkg_dir.with_suffix('.tmp')
 
                 # Construct physical package and manifest
-                self.m4_package_builder.build_package(plan, output_dir=pkg_dir)
+                self.m4_package_builder.build_package(plan, output_dir=tmp_dir)
 
                 # Stage M4-D: Post-Copy Validation
-                result.package_integrity = self.package_validator.validate(plan, package_dir=pkg_dir)
+                result.package_integrity = self.package_validator.validate(plan, package_dir=tmp_dir)
+                
+                if result.package_integrity.verified:
+                    import os
+                    import shutil
+                    if pkg_dir.exists():
+                        shutil.rmtree(pkg_dir)
+                    os.replace(tmp_dir, pkg_dir)
 
                 # Legacy compatibility: build_optimized_package and result.package
                 result.package = self.build_optimized_package(
