@@ -1,3 +1,7 @@
+"""AIDAR Runtime Path Initializer.
+
+Automatically ensures the src/ directory is on sys.path across all Python entrypoints.
+"""
 from pathlib import Path
 import sys
 

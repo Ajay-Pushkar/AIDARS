@@ -63,21 +63,20 @@ scheduler.get_render_requirements()
 4. **M4 Smart Packaging** — takes the M3 report and builds the *smallest
    correct* transferable package (`manifest.json` + asset dirs), resolved
    by asset → path → hash → exists? → package. Never blind-copy everything.
-5. **M5 Cache Engine** — layered (RAM / SSD / metadata DB), content-addressed
-   via SHA-256, not filenames. Big assets live on disk/filesystem; the DB
-   only stores metadata. Each worker reports its cache inventory
-   (`sha256:...` list) so Master only transfers what's missing.
-6. **M6 Worker Registry** — workers self-register (hostname, cpu, gpu, ram,
-   free storage, blender_version, status) and heartbeat.
-7. **M7 Scheduler** — do not do naive equal frame-count splitting. Weight by
-   estimated render cost (samples, resolution, geometry complexity, ray
-   depth, historical frame timings, GPU capability) plus cache locality.
-8. **M8 Worker Runtime** — Dispatcher → Worker receives `{job_id,
-   frame_start, frame_end, package_id}` → check cache → download missing →
-   launch Blender as a subprocess. No human touches Blender directly.
-9. **M9 Distributed Asset Transfer** — start Master→Worker only. Do **not**
-   build peer-to-peer transfer first; add Worker↔Worker later only if
-   profiling proves Master is a bottleneck.
+5. **M5 Distributed Asset Layer** — High-performance distributed content-addressed storage
+   mesh (`LocalCASAdapter`), inverted hash index (`CoordinatorService` & `WorkerRegistry`),
+   4-tier network locality prioritizer (`LOOPBACK` > `SUBNET` > `LAN` > `WAN`), memory-bounded
+   chunked streaming (`/api/v1/assets/{hash}/stream`), progressive SHA-256 integrity verification,
+   candidate failover, and self-healing node recovery.
+6. **M6 Adaptive Computational Resource System** — Workload specification (`WorkloadSpec`),
+   live hardware resource profiling (CPU, RAM, GPU, VRAM), multi-attribute placement decision
+   engine ($S(w, \tau)$), SingleFlight request deduplication, and sandboxed task execution.
+7. **M7 Distributed Render Scheduler** — Multi-node frame batching, camera-aware load balancing,
+   and headless Blender render dispatch across physical clusters.
+8. **M8 Result Collector & Verification** — Multi-pass frame verification, cryptographic hash
+   matching, and durable artifact ingestion into CAS.
+9. **M9 Cluster Hardening & Production Operations** — Auth, TLS encryption, worker sandboxing,
+   and observability dashboards.
 10. **M10 Result Collector** — verify each frame exists, hash matches,
     resolution/format/job_id correct; flag missing frames as `FAILED`.
 11. **M11 Fault Tolerance** — heartbeat timeout → detect partial completion

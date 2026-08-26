@@ -4,11 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aidars"
-version = "0.1.0"
+version = "0.5.0"
 description = "AI-Driven Adaptive Render and Asset Distribution System"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "AIDARS Contributors" }]
+dependencies = [
+    "pydantic>=2.0.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.27.0",
+    "httpx>=0.26.0",
+    "psutil>=5.9.0",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -21,9 +28,9 @@ aidars-scene = "aidars.scene_intelligence.cli:main"
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
     "ruff",
     "black",
     "mypy",
-    "fake-bpy-module-4.5==20260128",
 ]
