@@ -92,6 +92,7 @@ class DistributedWorker:
             endpoint_url=self.endpoint_url,
             capabilities=self.capabilities,
             metrics=self.node_metrics,
+            distributed_worker=self
         )
 
         self.client = DistributedClient(

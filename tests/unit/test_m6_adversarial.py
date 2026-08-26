@@ -53,6 +53,50 @@ def test_a1_resource_admission():
     d3 = engine.evaluate(w3, profiles)
     assert d3 is None
 
+@pytest.mark.asyncio
+async def test_b1_placement_recovery():
+    import time
+    now = time.time()
+    registry = WorkerRegistry()
+    registry.register_worker(WorkerInfo(
+        worker_id="WorkerB", endpoint_url="http://b", ip_address="1.1.1.1",
+        cpu_cores_total=4, capacity_bytes=10*1024**3, used_bytes=0, port=8001,
+        last_heartbeat_utc=now
+    ))
+    registry.register_worker(WorkerInfo(
+        worker_id="WorkerC", endpoint_url="http://c", ip_address="2.2.2.2",
+        cpu_cores_total=4, capacity_bytes=10*1024**3, used_bytes=0, port=8002,
+        last_heartbeat_utc=now
+    ))
+    
+    orch = WorkloadOrchestrator(registry, WorkloadRegistry())
+    
+    spec = WorkloadSpec(workload_id="W-Recovery", task_type="test", min_cpu_cores=1)
+    
+    class MockResponse:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {'success': True, 'worker_id': 'WorkerC', 'workload_id': 'W-Recovery', 'output_asset_hashes': [], 'error_message': None, 'execution_duration_seconds': 0.0}
+            
+    class MockClient:
+        async def post(self, url, **kwargs):
+            if "http://b" in url:
+                raise ValueError("Connection refused")
+            if "http://c" in url:
+                return MockResponse()
+                
+    orch.http_client = MockClient()
+    
+    # Should place on B, fail, re-place on C, and succeed
+    await orch.submit_workload(spec)
+    await asyncio.sleep(0.1) # let background task run
+    
+    record = orch.workload_registry.get_workload("W-Recovery")
+    # It should have attempted B then fallen back to C
+    assert record.placement_decision.selected_worker_id == "WorkerC"
+    assert record.state.name == "COMPLETED", record.error_message
+
 # ==========================================
 # CAMPAIGN B & C: EXECUTION & RECOVERY
 # ==========================================

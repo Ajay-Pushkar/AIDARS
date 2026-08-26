@@ -21,6 +21,8 @@ from aidars.distributed.models import (
     WorkerCapabilities,
     WorkerMetrics,
     validate_sha256_hex,
+    WorkloadSpec,
+    WorkloadExecutionResult,
 )
 from aidars.distributed.transfer import (
     DEFAULT_CHUNK_SIZE,
@@ -43,8 +45,10 @@ class WorkerServer:
         endpoint_url: Optional[str] = None,
         capabilities: Optional[WorkerCapabilities] = None,
         metrics: Optional[WorkerMetrics] = None,
+        distributed_worker: Optional[Any] = None,
     ) -> None:
         self.cas = cas_adapter
+        self.distributed_worker = distributed_worker
         self.worker_id = worker_id or f"worker-{int(time.time())}"
         self.host = host
         self.port = port
@@ -231,6 +235,15 @@ class WorkerServer:
                 server_timestamp_utc=now,
                 status="pong",
             )
+            
+        @router.post("/workloads/execute", response_model=WorkloadExecutionResult, summary="Execute a workload")
+        async def execute_workload_endpoint(spec: WorkloadSpec) -> WorkloadExecutionResult:
+            if not self.distributed_worker:
+                raise HTTPException(status_code=500, detail="Worker instance not linked to server")
+            # In a real app we'd dispatch to background task and return 202 Accepted.
+            # For this sync API, we just await it directly (suitable for testing/demo).
+            result = await self.distributed_worker.execute_workload(spec)
+            return result
 
         app.include_router(router)
         return app
