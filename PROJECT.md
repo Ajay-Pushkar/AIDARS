@@ -1,98 +1,152 @@
-# Project: AIDAR Request-Aware Scene Caching & Milestone 3 Visibility Pipeline
+# Project: AIDAR Milestone 5 Core (Local Content-Addressed Asset Cache)
 
 ## Architecture
-AIDAR is a Blender scene intelligence, visibility analysis, and dependency management framework.
-The project architecture for this scope consists of two decoupled subsystems:
+Milestone 5 Core provides a high-performance, robust, content-addressed asset caching subsystem isolated in `src/aidars/cache/`.
+- **Identity**: Strictly defined by cryptographic SHA-256 content hashes (`^[0-9a-f]{64}$`).
+- **Storage Layer (`storage.py`)**: Split-hash 2-level directory structure (`objects/<h[:2]>/<h[2:]>`), atomic writes via staging in `<cache_root>/tmp/<uuid>.tmp` on the same filesystem followed by `os.replace`, and chunked memory-bounded streaming (64 KiB buffers).
+- **Metadata Index (`index.py`)**: SQLite 3 database (`cache/metadata/index.db`) running in WAL mode with busy timeout, tracking `hash`, `size_bytes`, `asset_type`, `original_name`, `source_path`, `created_at`, `last_accessed_at`, `access_count`, and `verification_status`.
+- **Hit/Miss Resolver (`resolver.py`)**: $O(A)$ average-time set difference (`missing = required - cached`) using Python hash sets, with duck-typed M4 `PackagePlan` support and transfer efficiency metrics (`byte_hit_ratio`, `network_saved_bytes`).
+- **LRU Eviction Engine (`eviction.py`)**: Enforces max cache quota by querying entries ordered by `last_accessed_at ASC`, unlinking physical files and deleting SQLite records atomically with Windows file locking resilience.
+- **Integrity & Verification (`verifier.py`)**: Fast metadata checks and deep chunked SHA-256 validation; auto-eviction and self-healing of corrupted files.
+- **Facade (`store.py`, `base.py`)**: Abstract `CacheStore` interface and concrete `DiskCacheStore` integrating all components with zero dependencies on Blender (`bpy`) or scene graph modules.
 
-1. **Scene Intelligence & Request-Aware Caching (`src/aidars/scene_intelligence/`)**:
-   - `SceneEngineRequest`: Full dataclass defining run configurations (input path, output paths for scene/graph/package, stage execution flags, frame ranges, camera ID, blender executable). Provides deterministic SHA-256 `fingerprint()` incorporating all 10 configuration options.
-   - `SceneCache` & `SceneCacheEntry`: Multi-key SHA-256 caching system keyed by `f"{source_key}::{request_hash}"`. Validates both source payload SHA-256 and request configuration SHA-256. Enforces on-disk artifact existence verification (`scene_output`, `graph_output`, `package_output`) on every cache hit check.
-   - `SceneEngine`: High-level facade executing scene inspection, dependency graph extraction, integrity checks, M3 render requirement analysis, and package manifest creation.
-
-2. **Milestone 3 Render Requirement Analysis Pipeline (`src/aidars/visibility/`)**:
-   - `RenderRequest`: Encapsulates camera ID, frame window (`[frame_start, frame_end]`), resolution, view layer, scene name, and conservatism flags.
-   - `EligibilityAnalyzer`: Determines static `hide_render`/`hide_viewport` states and animates F-curve keyframe evaluation across frame ranges.
-   - `CameraAnalyzer` / `CameraModel`: Parses camera matrices, FOV (horizontal & vertical), clipping planes, and orthonormal view basis vectors ($R, U, D$).
-   - `FrustumCuller` / `BoundingBox`: Computes world-space bounding boxes (scaled, rotated, translated) and executes 6-plane frustum intersection (perspective and orthographic). Performs conservative 9-point raycast occlusion testing with camera-space forward depth sorting.
-   - `InfluenceAnalyzer`: Preserves essential non-camera entities (`LIGHT_SOURCE`, `PARENT_HIERARCHY`, `SIMULATION`, `ANIMATION_DRIVER`, `WORLD_ENVIRONMENT`, `DEPENDENCY`).
-   - `DependencyResolver`: Performs transitive BFS closure over DependencyGraph to extract required meshes, materials, textures, and images with strict node kind discrimination and None-safe unpacking.
-   - `RenderRequirementReport`: Canonical typed report maintaining reasons (`RequirementReason`), statistics, `.to_dict()` (M3 schema) and `.to_r4_dict()` (R4 legacy schema).
-
-3. **Isolated / Out-of-Bounds Subsystems (DO NOT TOUCH)**:
-   - `src/aidars/scheduler/` (Frame scheduler)
-   - `src/aidars/smart_package/` (M4 Smart packaging builder & asset optimizer)
-   - Workers / Networking runtime
-
----
+```
++-------------------------------------------------------------------------------+
+|                             AIDAR Workflows / M4                              |
+|          (PackagePlan / AssetRecord / Requested Hashes / Streams)             |
++---------------------------------------+---------------------------------------+
+                                        | (duck-typed hashes & sizes)
+                                        v
++-------------------------------------------------------------------------------+
+|                       DiskCacheStore (CacheStore ABC)                         |
+|  - contains(h)    - get_path(h)   - put_bytes/file/stream(h) - verify(h)      |
+|  - get_stream(h)  - remove(h)     - resolve(hashes/plan)     - evict(bytes)   |
++-----------+-------------------+-------------------+-------------------+-------+
+            |                   |                   |                   |
+            v                   v                   v                   v
++-------------------+ +-------------------+ +-------------------+ +-------------------+
+| SplitHashStorage  | | SQLiteMetaIndex   | | HitMissResolver   | | LRUEvictor &      |
+| - objects/aa/bb.. | | - index.db (WAL)  | | - O(A) set diff   | | IntegrityVerifier |
+| - tmp staging     | | - last_accessed   | | - byte_hit_ratio  | | - quota enforce   |
+| - atomic replace  | | - size_bytes      | | - network_saved   | | - self-healing    |
+| - 64KB chunking   | | - status          | | - PackagePlan res | | - deep SHA256     |
++-------------------+ +-------------------+ +-------------------+ +-------------------+
+```
 
 ## Feature Inventory
 | # | Feature | Description | Milestone | Source |
 |---|---------|-------------|-----------|--------|
-| F1 | `SceneEngineRequest.fingerprint()` | Computes deterministic SHA-256 covering all request fields: scene_output, graph_output, package_output, build_graph, build_package, optimize_package_by_visibility, frame_start, frame_end, camera_id, blender_executable | M1 | Survey / R1 |
-| F2 | `SceneCacheEntry` Dataclass | Data model holding source_hash, request_hash, output paths, stage flags, frame ranges, camera_id, and cached_at timestamp | M1 | Survey / R1 |
-| F3 | Request-Aware `SceneCache.get()` & `has_changed()` | Keyed isolation by `source_key::request_hash`, strict fallback checking, on-disk artifact verification for all requested stages | M1 | Survey / R1 |
-| F4 | `SceneCache.put()` Isolation | Isolates multi-request cache entries without clobbering base entries | M1 | Survey / R1 |
-| F5 | Request-Aware Cache Invalidation on Config / Artifact Change | Ensures changing request flags (e.g. build_package=False vs True) or deleting output artifacts triggers cache miss and re-execution | M1 | Survey / R1, R2 |
-| F6 | Rigorous Cache Verification Test Suite (R2) | Test suite in `test_scene_cache.py`, `test_scene_engine_facade.py`, and `test_cache_adversarial.py` proving multi-request coexistence, fallback rejection, artifact deletion misses, camera_id discrimination | M1 | Survey / R2 |
-| F7 | `RenderRequest` Dataclass & Parsing | Camera ID, frame range, resolution, view layer, scene name, conservatism flags | M2 | Survey / R3 |
-| F8 | `EligibilityAnalyzer` | Static render visibility + animated F-curve keyframe evaluation over frame ranges | M2 | Survey / R3 |
-| F9 | `CameraAnalyzer` & `CameraModel` | Camera basis vectors ($R, U, D$), FOV derivation, clipping planes, perspective/orthographic matrices | M2 | Survey / R3 |
-| F10 | `FrustumCuller` & Occlusion Testing | 6-plane frustum culling, world-space AABB transformation, 9-point raycast occlusion query with camera forward depth sorting | M2 | Survey / R3 |
-| F11 | `InfluenceAnalyzer` | Preservation of lights, parent hierarchies (cycle-safe), simulation modifiers, particle systems, world HDRI | M2 | Survey / R3 |
-| F12 | `DependencyResolver` | Transitive closure over DependencyGraph for meshes, materials, textures, and images with BFS material traversal and None-safe unpacking | M2 | Survey / R3 |
-| F13 | `RenderRequirementReport` & Schema Serialization | Canonical typed report with reason tracking (`RequirementReason`), `.to_dict()`, `.to_r4_dict()` | M2 | Survey / R3 |
-| F14 | `SceneEngine` M3 Visibility Integration | Direct `analyze_render_requirements()` and `SceneEngine.run(optimize_package_by_visibility=True)` returning typed report | M2 | Survey / R3 |
-| F15 | Complete Test Suite Verification (115 tests) | All 115 unit, facade, cache, visibility, and adversarial tests pass cleanly | M3 | Acceptance Criteria |
-| F16 | Adversarial Hardening & Forensic Integrity Audit | Adversarial verification of edge cases, zero cheating/hardcoding, CLEAN auditor verdict | M3 | Project Pattern |
-| F17 | `PackagePlanner` & Logical Packaging (M4-A) | Resolves rendering requirements and dependencies, performs asset deduplication, and generates a canonical schema v1.0 `PackagePlan`. | M4 | Implementation |
-| F18 | SHA-256 Hashing & Identity (M4-B) | Calculates deterministic cryptographic hashes for all packaged physical files, tracking exact filesystem dimensions and byte sizes. | M4 | Implementation |
-| F19 | `PackageBuilder` & Atomic Publication (M4-C) | Constructs the package via `O(B)` byte copying into a secure `tempfile.mkdtemp` space. Ensures thread-safe/process-safe publishing via a deterministic `.bak` atomic directory swap. | M4 | Implementation |
-| F20 | O(1) Blender Path Remapping (M4-C) | Injects headless Blender execution to seamlessly remap internal `.blend` absolute/relative paths using strict `O(1)` dictionary lookups. | M4 | Implementation |
-| F21 | `PackageValidator` & Contract Enforcement (M4-D) | Enforces the strict existence of the source `.blend` and executes a secondary validation layer inside headless Blender to verify path resolutions. Handles gracefully `FileNotFoundError`/`PermissionError` when environment fails. | M4 | Implementation |
-| F22 | M4 Test Suite & Algorithmic Adherence | 171 passing Python tests, plus an end-to-end real Blender smoke render test. Proven strictly within `O(V + E + A log A + B)` operational constraints. | M4 | Implementation |
-
----
+| 1 | Content-Addressed Storage | Filesystem store where identity is purely SHA-256 | M1-Storage | ORIGINAL_REQUEST R1 |
+| 2 | Split-Hash 2-Level Fanout | `objects/<h[:2]>/<h[2:]>` layout avoiding directory bloat | M1-Storage | ORIGINAL_REQUEST R1 |
+| 3 | Atomic File Ingestion | Staging in `tmp/` + `os.replace` preventing partial corruption | M1-Storage | Survey / POSIX/NTFS |
+| 4 | Chunked Transfer & Bounded RAM | 64 KiB streaming reading/writing bounding memory to O(1) | M1-Storage | ORIGINAL_REQUEST R4 |
+| 5 | SQLite Metadata Index | SQLite database at `cache/metadata/index.db` in WAL mode | M2-Index | ORIGINAL_REQUEST R2 |
+| 6 | Touch & Access Tracking | Updates `last_accessed_at` and `access_count` on access | M2-Index | ORIGINAL_REQUEST R2 |
+| 7 | O(A) Set-Difference Resolver | `missing = required - cached` in O(A) average time | M3-Resolver | ORIGINAL_REQUEST R3 |
+| 8 | Transfer Efficiency Metrics | Computes `byte_hit_ratio` and `network_saved` | M3-Resolver | ORIGINAL_REQUEST R3 |
+| 9 | M4 PackagePlan Bridge | Duck-typed resolver accepting M4 plans or dicts | M3-Resolver | ORIGINAL_REQUEST R3, R5 |
+| 10 | LRU Quota Eviction | Evicts entries by `last_accessed_at ASC` when quota exceeded | M4-Eviction | ORIGINAL_REQUEST R4 |
+| 11 | Integrity Verification | Fast and deep SHA-256 verification and corruption self-healing | M4-Eviction | ORIGINAL_REQUEST R4 |
+| 12 | CacheStore Public Interface | ABC `CacheStore` & `DiskCacheStore` facade | M5-Facade | ORIGINAL_REQUEST R4 |
+| 13 | Subsystem Independence | Zero imports of `bpy`, `bmesh`, or scene graph modules | M5-Facade | ORIGINAL_REQUEST R5 |
+| 14 | 4-Tier Test Suite | Comprehensive pytest suite covering Tiers 1-4 + corruption | M6-Tests | Acceptance Criteria |
+| 15 | Adversarial Hardening | Challenger edge cases & Forensic Audit integrity check | M7-Hardening | Project Quality Gate |
 
 ## Milestones
-| # | Name | Scope | Dependencies | Status | Key Output / Verification |
-|---|------|-------|-------------|--------|---------------------------|
-| 1 | M1: Request-Aware Scene Caching & Tests | Fix `cache.py`, `scene_engine.py` cache integration, and implement comprehensive R2 verification tests | none | DONE | 14 cache unit tests + 16 facade integration tests + 10 adversarial cache tests passing |
-| 2 | M2: Milestone 3 Visibility Pipeline Verification | Verify and remediate M3 components in `src/aidars/visibility/`, reason tracking, and typed SceneEngine integration | none | DONE | 13 M3 pipeline tests + 12 visibility tests + 16 adversarial visibility tests passing |
-| 3 | M3: Full Test Suite Integration & Forensic Audit | Run full 115-test suite, verify adversarial coverage, execute forensic integrity audit | M1, M2 | DONE | 115/115 tests green, 0 errors, 0 failures, CLEAN audit verdict |
-
----
+| # | Name | Scope | Dependencies | Status |
+|---|------|-------|-------------|--------|
+| M1 | Storage & Models | `models.py`, `storage.py`, split-hash CAS, atomic staging, 64 KiB chunking | None | DONE |
+| M2 | SQLite Metadata Index | `index.py`, schema, WAL pragmas, touch/access tracking, query methods | M1 | DONE |
+| M3 | Hit/Miss Resolver | `resolver.py`, O(A) set difference, M4 PackagePlan bridge, metrics | M1, M2 | DONE |
+| M4 | LRU Eviction & Verifier | `eviction.py`, `verifier.py`, quota enforcement, deep verification, self-healing | M1, M2 | DONE |
+| M5 | CacheStore Facade | `base.py`, `store.py`, `__init__.py`, unifying all components | M1, M2, M3, M4 | DONE |
+| M6 | Test Suite (Tiers 1-4) | `tests/test_cache_store.py`, `tests/test_cache_adversarial.py` | M5 | DONE |
+| M7 | Final Hardening & Audit | E2E 100% Pass, Challenger verification, Forensic Audit | M6 | DONE |
 
 ## Interface Contracts
-### `SceneEngineRequest` ↔ `SceneCache`
-- `SceneEngineRequest.fingerprint() -> str`: SHA-256 of JSON canonical dict of all configuration options.
-- `SceneCache.get(source_key: str | Path, request_hash: str = "", verify_artifacts: bool = False) -> Optional[SceneCacheEntry]`
-- `SceneCache.put(source_key: str | Path, entry: SceneCacheEntry) -> None`
-- `SceneCache.has_changed(source_key: str | Path, current_hash: str, request_hash: str = "", verify_artifacts: bool = False) -> bool`
-- `SceneCache.invalidate(source_key: str | Path) -> None`
 
-### `SceneEngine` ↔ `RenderRequirementAnalyzer`
-- `SceneEngine.analyze_render_requirements(source: str | Path | dict, request: Optional[RenderRequest | dict] = None) -> RenderRequirementReport`
-- `RenderRequirementReport.to_dict() -> Dict[str, Any]`
-- `RenderRequirementReport.to_r4_dict() -> Dict[str, List[str]]`
+### Data Models (`src/aidars/cache/models.py`)
+```python
+@dataclass(slots=True)
+class CacheEntry:
+    sha256: str
+    size_bytes: int
+    asset_type: str = "unknown"
+    original_name: str = ""
+    source_path: str = ""
+    created_at: float = field(default_factory=time.time)
+    last_accessed_at: float = field(default_factory=time.time)
+    access_count: int = 1
+    verification_status: str = "verified"
+    relative_path: str = ""
+    metadata: dict = field(default_factory=dict)
 
----
+@dataclass(slots=True)
+class ResolutionResult:
+    hits: set[str]
+    misses: set[str]
+    total_requested_bytes: int
+    hit_bytes: int
+    miss_bytes: int
+    byte_hit_ratio: float
+    network_saved_bytes: int
+
+@dataclass(slots=True)
+class VerificationReport:
+    verified_count: int
+    corrupted_count: int
+    missing_count: int
+    corrupted_hashes: list[str]
+    missing_hashes: list[str]
+    is_healthy: bool
+```
+
+### CacheStore ABC (`src/aidars/cache/base.py`)
+```python
+class CacheStore(ABC):
+    @abstractmethod
+    def contains(self, sha256: str) -> bool: ...
+    @abstractmethod
+    def get_path(self, sha256: str) -> Optional[Path]: ...
+    @abstractmethod
+    def get_stream(self, sha256: str, chunk_size: int = 65536) -> Iterator[bytes]: ...
+    @abstractmethod
+    def get_bytes(self, sha256: str) -> Optional[bytes]: ...
+    @abstractmethod
+    def put_bytes(self, data: bytes, sha256: Optional[str] = None, original_name: str = "", asset_type: str = "unknown") -> CacheEntry: ...
+    @abstractmethod
+    def put_file(self, file_path: Path, sha256: Optional[str] = None, original_name: str = "", asset_type: str = "unknown") -> CacheEntry: ...
+    @abstractmethod
+    def put_stream(self, stream: BinaryIO, size_bytes: int, sha256: str, original_name: str = "", asset_type: str = "unknown") -> CacheEntry: ...
+    @abstractmethod
+    def verify(self, sha256: str, deep_check: bool = True) -> bool: ...
+    @abstractmethod
+    def verify_all(self, auto_evict: bool = True) -> VerificationReport: ...
+    @abstractmethod
+    def remove(self, sha256: str) -> bool: ...
+    @abstractmethod
+    def evict_lru(self, target_bytes_to_free: int) -> int: ...
+    @abstractmethod
+    def resolve_hashes(self, required_hashes: Iterable[str]) -> ResolutionResult: ...
+    @abstractmethod
+    def resolve_plan(self, plan: Any) -> ResolutionResult: ...
+    @abstractmethod
+    def get_stats(self) -> dict: ...
+```
 
 ## Code Layout
-- `src/aidars/scene_intelligence/cache.py`: SceneCache, SceneCacheEntry, hash functions.
-- `src/aidars/scene_intelligence/scene_engine.py`: SceneEngine, SceneEngineRequest, SceneEngineResult.
-- `src/aidars/visibility/`:
-  - `models.py`: RenderRequest, RenderRequirementReport, RequirementReason.
-  - `eligibility.py`: EligibilityAnalyzer.
-  - `camera.py`: CameraAnalyzer, CameraModel.
-  - `geometry.py`: FrustumCuller, BoundingBox.
-  - `influence.py`: InfluenceAnalyzer.
-  - `resolver.py`: DependencyResolver.
-  - `analyzer.py`: RenderRequirementAnalyzer.
-  - `engine.py`: VisibilityEngine (legacy facade).
-- `tests/`:
-  - `test_scene_cache.py`: Unit tests for SceneCache.
-  - `test_cache_adversarial.py`: Adversarial stress tests for SceneCache.
-  - `test_scene_engine_facade.py`: Integration tests for SceneEngine caching and stages.
-  - `test_visibility.py`: Geometry and visibility tests.
-  - `test_visibility_adversarial.py`: Adversarial edge case tests for visibility.
-  - `test_render_requirements.py`: Exhaustive M3 render requirement pipeline tests.
+```
+src/aidars/cache/
+├── __init__.py           # Exports: CacheStore, DiskCacheStore, CacheEntry, ResolutionResult, etc.
+├── base.py               # Abstract base class CacheStore
+├── models.py             # Dataclasses, exceptions (CacheError, QuotaExceededError, HashMismatchError)
+├── storage.py            # SplitHashStorage (filesystem operations, split paths, atomic rename, chunking)
+├── index.py              # SQLiteMetadataIndex (schema, WAL mode, CRUD, access tracking, query indices)
+├── resolver.py           # HitMissResolver (O(A) set difference, M4 bridge, metric calculation)
+├── eviction.py           # LRUEvictor (quota enforcement, last_accessed_at sorting, atomic cleanup)
+├── verifier.py           # IntegrityVerifier (fast metadata check, deep SHA-256 stream check, auto-evict)
+└── store.py              # Concrete DiskCacheStore integrating all modules
+tests/
+├── test_cache_store.py         # Tiers 1-4 comprehensive unit & integration tests
+└── test_cache_adversarial.py   # Boundary, corruption, concurrency, and decoupling stress tests
+```
