@@ -30,9 +30,15 @@ from aidars.distributed.models import (
     WorkerRegistrationPayload,
     WorkerRegistrationResponse,
     WorkerStatus,
+    WorkloadSpec,
+    WorkloadExecutionResult,
     validate_sha256_hex,
 )
 from aidars.distributed.server import WorkerServer
+from aidars.distributed.singleflight import SingleFlight
+from aidars.distributed.resources import WorkerResourceMonitor
+from aidars.distributed.execution import ExecutionManager
+from aidars.distributed.runtime import GenericSubprocessRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +101,17 @@ class DistributedWorker:
             http_client=http_client,
             chunk_size=self.capabilities.chunk_size_bytes,
         )
+
+        self.resource_monitor = WorkerResourceMonitor(
+            worker_id=self.worker_id,
+            endpoint_url=self.endpoint_url,
+            ip_address=self.ip_address,
+        )
+        self.execution_manager = ExecutionManager(
+            cas_adapter=self.cas,
+            workloads_dir=str(Path(self.cas.cas_dir).parent / "workloads")
+        )
+        self.single_flight = SingleFlight()
 
         # 4. State & Background Tasks
         self.status = WorkerStatus.ACTIVE
@@ -163,6 +180,7 @@ class DistributedWorker:
                 logger.warning("Failed to unregister worker %s: %s", self.worker_id, exc)
 
         await self.client.aclose()
+        self.resource_monitor.shutdown()
         logger.info("DistributedWorker %s stopped.", self.worker_id)
 
     async def __aenter__(self) -> DistributedWorker:
@@ -338,3 +356,45 @@ class DistributedWorker:
                 self.metrics_tracker.record_transfer_failure(unres_h)
 
         return results
+
+    # ========================================================================
+    # Workload Execution
+    # ========================================================================
+
+    async def execute_workload(self, spec: WorkloadSpec) -> WorkloadExecutionResult:
+        """Synchronize required assets and execute the workload in a sandbox."""
+        logger.info("Worker %s executing workload %s", self.worker_id, spec.workload_id)
+        
+        # 1. Sync dependencies with SingleFlight deduplication per asset
+        if spec.input_asset_hashes:
+            # For simplicity, we just sync the whole set at once, but we could wrap 
+            # each hash in single_flight.run. The DistributedClient manages concurrency.
+            # Using singleflight at a higher level to prevent concurrent syncs of the same workload spec.
+            def _sync():
+                return self.sync_assets(spec.input_asset_hashes)
+            
+            sync_results = await self.single_flight.run(
+                key=f"sync-{spec.workload_id}",
+                operation=_sync
+            )
+            
+            for h, res in sync_results.items():
+                if not res.success:
+                    return WorkloadExecutionResult(
+                        workload_id=spec.workload_id,
+                        worker_id=self.worker_id,
+                        success=False,
+                        output_asset_hashes=set(),
+                        execution_duration_seconds=0.0,
+                        error_message=f"Failed to sync dependency {h}: {res.error_message}",
+                    )
+
+        # 2. Setup runtime and execute
+        runtime = GenericSubprocessRuntime()
+        result = await self.execution_manager.execute_workload(
+            spec=spec,
+            worker_id=self.worker_id,
+            runtime=runtime,
+        )
+        
+        return result

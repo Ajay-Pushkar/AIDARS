@@ -28,10 +28,13 @@ from aidars.distributed.models import (
     WorkerRegistrationPayload,
     WorkerRegistrationResponse,
     WorkerStatus,
+    WorkloadSpec,
     validate_sha256_hex,
 )
 from aidars.distributed.prioritizer import CandidatePrioritizer, LatencyTracker
 from aidars.distributed.registry import ClusterStats, WorkerRegistry
+from aidars.distributed.workload_registry import WorkloadRegistry, WorkloadRecord
+from aidars.distributed.workload import WorkloadOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +64,8 @@ class CoordinatorService:
         self.registry = registry or WorkerRegistry(
             heartbeat_timeout_seconds=self.heartbeat_timeout_seconds
         )
+        self.workload_registry = WorkloadRegistry()
+        self.orchestrator = WorkloadOrchestrator(self.registry, self.workload_registry)
 
         self._start_time_utc = time.time()
         self._running = False
@@ -446,6 +451,44 @@ class CoordinatorService:
                 server_timestamp_utc=now,
                 status="pong",
             )
+
+        # --- Workloads ---
+        @router.post(
+            "/workloads/submit",
+            response_model=Dict[str, str],
+            status_code=status.HTTP_202_ACCEPTED,
+            summary="Submit a computational workload",
+        )
+        async def submit_workload(spec: WorkloadSpec) -> Dict[str, str]:
+            workload_id = await self.orchestrator.submit_workload(spec)
+            return {"workload_id": workload_id, "status": "submitted"}
+
+        @router.get(
+            "/workloads/{workload_id}",
+            status_code=status.HTTP_200_OK,
+            summary="Get workload status",
+        )
+        async def get_workload_status(workload_id: str) -> Dict[str, Any]:
+            record = self.workload_registry.get_workload(workload_id)
+            if not record:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Workload '{workload_id}' not found.",
+                )
+            
+            resp = {
+                "workload_id": workload_id,
+                "state": record.state.value,
+                "submitted_at": record.submitted_at,
+                "completed_at": record.completed_at,
+                "error_message": record.error_message,
+            }
+            if record.placement_decision:
+                resp["placement"] = record.placement_decision.model_dump()
+            if record.execution_result:
+                resp["result"] = record.execution_result.model_dump()
+                
+            return resp
 
         app.include_router(router)
         return app

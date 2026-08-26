@@ -568,3 +568,83 @@ class ClusterTelemetry(BaseModel):
     total_cluster_capacity_bytes: int = Field(default=0, ge=0)
     total_cluster_used_bytes: int = Field(default=0, ge=0)
     aggregate_active_transfers: int = Field(default=0, ge=0)
+
+
+# ============================================================================
+# M6 Workload & Execution Models
+# ============================================================================
+
+class WorkloadSpec(BaseModel):
+    """Declarative specification of a computational task."""
+    model_config = ConfigDict(extra="ignore")
+
+    workload_id: str = Field(..., min_length=1, max_length=128)
+    task_type: str = Field(..., min_length=1, max_length=64)  # e.g., "blender_render", "scene_eval"
+    input_asset_hashes: Set[str] = Field(default_factory=set)
+
+    min_cpu_cores: int = Field(default=1, ge=1)
+    min_ram_bytes: int = Field(default=1024 * 1024 * 1024, ge=1)  # 1 GiB default
+
+    requires_gpu: bool = Field(default=False)
+    min_vram_bytes: int = Field(default=0, ge=0)
+
+    estimated_duration_seconds: float = Field(default=10.0, gt=0.0)
+    priority: int = Field(default=100, ge=0)
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("input_asset_hashes")
+    @classmethod
+    def validate_hashes(cls, v: Set[str]) -> Set[str]:
+        return {validate_sha256_hex(h) for h in v}
+
+
+class WorkerResourceProfile(BaseModel):
+    """Real-time compute and hardware state advertised by a worker."""
+    model_config = ConfigDict(extra="ignore")
+
+    worker_id: str = Field(...)
+    endpoint_url: str = Field(...)
+    ip_address: str = Field(...)
+
+    cpu_cores_total: int = Field(..., ge=1)
+    cpu_utilization_percent: float = Field(..., ge=0.0, le=100.0)
+
+    ram_total_bytes: int = Field(..., ge=1)
+    ram_available_bytes: int = Field(..., ge=0)
+
+    gpu_available: bool = Field(default=False)
+    gpu_device_name: Optional[str] = None
+    vram_total_bytes: int = Field(default=0, ge=0)
+    vram_available_bytes: int = Field(default=0, ge=0)
+
+    active_workload_count: int = Field(default=0, ge=0)
+    local_cached_hashes: Set[str] = Field(default_factory=set)
+    timestamp_utc: float = Field(default_factory=time.time)
+
+
+class PlacementDecision(BaseModel):
+    """Explainable output of the multi-attribute placement decision engine."""
+    model_config = ConfigDict(extra="ignore")
+
+    workload_id: str
+    selected_worker_id: str
+    placement_score: float
+    score_breakdown: Dict[str, float]  # e.g., {"compute": 0.85, "locality": 1.0, "latency": -0.05}
+    missing_assets_on_worker: Set[str]
+    execution_tier: str  # "local", "subnet", "lan"
+    decision_timestamp_utc: float = Field(default_factory=time.time)
+
+
+class WorkloadExecutionResult(BaseModel):
+    """Immutable result metadata returned after workload completion."""
+    model_config = ConfigDict(extra="ignore")
+
+    workload_id: str
+    worker_id: str
+    success: bool
+    output_asset_hashes: Set[str]  # Verified SHA-256 artifacts committed to CAS
+    execution_duration_seconds: float
+    error_message: Optional[str] = None
+    stdout_snippet: Optional[str] = None
+    stderr_snippet: Optional[str] = None
+
