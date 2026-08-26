@@ -4,9 +4,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from aidars.scene_intelligence.dependency_graph import DependencyGraphBuilder
-from aidars.scene_intelligence.engine import SceneIntelligenceEngine
-from aidars.scheduler.frame_scheduler import FrameScheduler
+from aidars.adapters.blender.intelligence.dependency_graph import DependencyGraphBuilder
+from aidars.adapters.blender.intelligence.engine import SceneIntelligenceEngine
+from aidars.adapters.blender.strategies.frame_scheduler import FrameScheduler
 
 BASE_SCENE = {
     "metadata": {"name": "Demo", "frame_start": 1, "frame_end": 100, "fps": 24},

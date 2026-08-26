@@ -8,12 +8,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from unittest.mock import patch
-from aidars.scene_intelligence.integrity import IntegrityReport
-from aidars.scene_intelligence.models import SceneSnapshot
-from aidars.scene_intelligence.scene_engine import SceneEngine, SceneEngineRequest, SceneEngineResult
-from aidars.scheduler.frame_scheduler import FrameScheduler, SchedulingPlan
-from aidars.smart_package.models import PackageIntegrityReport
-from aidars.visibility import RenderRequirementReport
+from aidars.adapters.blender.intelligence.integrity import IntegrityReport
+from aidars.adapters.blender.intelligence.models import SceneSnapshot
+from aidars.adapters.blender.intelligence.scene_engine import SceneEngine, SceneEngineRequest, SceneEngineResult
+from aidars.adapters.blender.strategies.frame_scheduler import FrameScheduler, SchedulingPlan
+from aidars.adapters.blender.packaging.models import PackageIntegrityReport
+from aidars.adapters.blender.visibility import RenderRequirementReport
 
 SAMPLE_SCENE = {
     "metadata": {"name": "Demo", "frame_start": 1, "frame_end": 24, "fps": 24},
@@ -49,7 +49,7 @@ class SceneEngineTests(unittest.TestCase):
     """
     
     def setUp(self):
-        self.patcher = patch("aidars.smart_package.validator.PackageValidator.validate", return_value=PackageIntegrityReport(verified=True, asset_count=0, verified_count=0, failed_assets=[], missing_assets=[]))
+        self.patcher = patch("aidars.adapters.blender.packaging.validator.PackageValidator.validate", return_value=PackageIntegrityReport(verified=True, asset_count=0, verified_count=0, failed_assets=[], missing_assets=[]))
         self.patcher.start()
         
     def tearDown(self):

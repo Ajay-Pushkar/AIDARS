@@ -29,7 +29,7 @@ class SceneIntelligenceEngine:
     This class does normalization only (SceneData/dict -> SceneSnapshot). It
     does not build the dependency graph, run integrity checks, or handle
     packaging - for the full pipeline, use
-    ``aidars.scene_intelligence.scene_engine.SceneEngine``, which composes
+    ``aidars.adapters.blender.intelligence.scene_engine.SceneEngine``, which composes
     this class with the rest of the pipeline.
     """
 

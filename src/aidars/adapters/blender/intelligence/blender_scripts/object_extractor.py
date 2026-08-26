@@ -2,14 +2,14 @@
 
 Executed inside Blender's embedded Python runtime (see inspect_scene.py).
 Produces the ``objects`` block of the AIDARS scene payload, matching the
-schema consumed by ``aidars.scene_intelligence.builders.ObjectBuilder``.
+schema consumed by ``aidars.adapters.blender.intelligence.builders.ObjectBuilder``.
 
 Every extractor function here is defensive: Blender's Python API differs
 slightly across object/modifier/constraint types and versions, so missing
 attributes are treated as "nothing to report" (empty list/dict/None) rather
 than raising and aborting the whole scan.
 
-Division of responsibility with the builders (``aidars.scene_intelligence.
+Division of responsibility with the builders (``aidars.adapters.blender.intelligence.
 builders``): this module only extracts and does the type coercion required
 to make bpy-native values (Vector, Euler, Quaternion, etc.) JSON-serializable.
 It does not decide schema defaults or reject malformed data - that's the
@@ -224,7 +224,7 @@ def extract_objects(scene: Any) -> list:
 
     Returns:
         A list of dictionaries matching
-        ``aidars.scene_intelligence.builders.ObjectBuilder``'s expected shape.
+        ``aidars.adapters.blender.intelligence.builders.ObjectBuilder``'s expected shape.
     """
 
     objects = []

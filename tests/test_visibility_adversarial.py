@@ -7,8 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from aidars.scene_intelligence.scene_engine import SceneEngine, SceneEngineRequest
-from aidars.visibility import (
+from aidars.adapters.blender.intelligence.scene_engine import SceneEngine, SceneEngineRequest
+from aidars.adapters.blender.visibility import (
     BoundingBox,
     CameraAnalyzer,
     CameraModel,
@@ -517,9 +517,9 @@ class VisibilityEngineAdversarialTests(unittest.TestCase):
     # Section 8: SceneEngine Pipeline Integration with Visibility Analysis
     # =========================================================================
 
-    @unittest.mock.patch("aidars.smart_package.validator.PackageValidator.validate")
+    @unittest.mock.patch("aidars.adapters.blender.packaging.validator.PackageValidator.validate")
     def test_scene_engine_integration_adversarial_workflow(self, mock_val) -> None:
-        from aidars.smart_package.models import PackageIntegrityReport
+        from aidars.adapters.blender.packaging.models import PackageIntegrityReport
         mock_val.return_value = PackageIntegrityReport(verified=True, asset_count=0, verified_count=0, failed_assets=[], missing_assets=[])
         """Verify SceneEngine.run() end-to-end with optimize_package_by_visibility=True
         under adversarial constraints.

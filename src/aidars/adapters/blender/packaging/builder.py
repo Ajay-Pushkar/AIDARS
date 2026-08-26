@@ -16,7 +16,7 @@ from .models import (
 )
 
 if TYPE_CHECKING:
-    from aidars.scene_intelligence.dependency_graph import DependencyGraph
+    from aidars.adapters.blender.intelligence.dependency_graph import DependencyGraph
 
 logger = logging.getLogger(__name__)
 

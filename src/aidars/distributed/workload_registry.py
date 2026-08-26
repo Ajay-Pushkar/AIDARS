@@ -68,7 +68,7 @@ class WorkloadRegistry:
             if not record:
                 return False
             record.state = state
-            if error_message:
+            if error_message is not None:
                 record.error_message = error_message
             if state in (WorkloadState.COMPLETED, WorkloadState.FAILED, WorkloadState.TIMEOUT, WorkloadState.UNSCHEDULABLE):
                 if not record.completed_at:

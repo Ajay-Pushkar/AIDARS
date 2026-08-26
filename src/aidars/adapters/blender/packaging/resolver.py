@@ -25,9 +25,9 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 from .models import AssetRecord, AssetStatus, AssetType, SelectionReason
 
 if TYPE_CHECKING:
-    from aidars.scene_intelligence.dependency_graph import DependencyGraph, GraphNode
-    from aidars.scene_intelligence.models import SceneSnapshot
-    from aidars.visibility.models import RenderRequirementReport
+    from aidars.adapters.blender.intelligence.dependency_graph import DependencyGraph, GraphNode
+    from aidars.adapters.blender.intelligence.models import SceneSnapshot
+    from aidars.adapters.blender.visibility.models import RenderRequirementReport
 
 
 # ── Identifier prefix conventions used by DependencyGraphBuilder ──

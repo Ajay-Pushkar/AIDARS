@@ -2,7 +2,7 @@
 
 Executed inside Blender's embedded Python runtime (see inspect_scene.py).
 Produces the ``collections`` block of the AIDARS scene payload, matching the
-schema consumed by ``aidars.scene_intelligence.builders.CollectionBuilder``.
+schema consumed by ``aidars.adapters.blender.intelligence.builders.CollectionBuilder``.
 """
 from __future__ import annotations
 

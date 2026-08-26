@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from aidars.scene_intelligence.scene_engine import SceneEngine, SceneEngineRequest
+from aidars.adapters.blender.intelligence.scene_engine import SceneEngine, SceneEngineRequest
 
 
 class BlenderIntegrationTests(unittest.TestCase):

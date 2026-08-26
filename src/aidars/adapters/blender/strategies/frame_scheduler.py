@@ -30,14 +30,14 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Dict, Set
 
-from aidars.visibility.engine import VisibilityAnalyzer
-from aidars.visibility.analyzer import RenderRequirementAnalyzer
-from aidars.visibility.models import RenderRequest
-from aidars.smart_package.resolver import RequirementResolver, DependencyClosureResolver
+from aidars.adapters.blender.visibility.engine import VisibilityAnalyzer
+from aidars.adapters.blender.visibility.analyzer import RenderRequirementAnalyzer
+from aidars.adapters.blender.visibility.models import RenderRequest
+from aidars.adapters.blender.packaging.resolver import RequirementResolver, DependencyClosureResolver
 
 if TYPE_CHECKING:
-    from aidars.scene_intelligence.dependency_graph import DependencyGraph
-    from aidars.scene_intelligence.models import SceneSnapshot
+    from aidars.adapters.blender.intelligence.dependency_graph import DependencyGraph
+    from aidars.adapters.blender.intelligence.models import SceneSnapshot
 
 
 @dataclass(slots=True)

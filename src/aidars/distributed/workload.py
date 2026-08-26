@@ -63,7 +63,7 @@ class WorkloadOrchestrator:
                     worker_id=worker_id,
                     endpoint_url=info.endpoint_url,
                     ip_address=info.ip_address,
-                    cpu_cores_total=4, # Placeholder
+                    cpu_cores_total=info.cpu_cores_total if hasattr(info, 'cpu_cores_total') and info.cpu_cores_total else 8,
                     cpu_utilization_percent=info.last_metrics.cpu_percent if info.last_metrics else 0.0,
                     ram_total_bytes=info.capacity_bytes or 8_000_000_000,
                     ram_available_bytes=info.available_bytes,
@@ -119,8 +119,13 @@ class WorkloadOrchestrator:
                                 resp = await client.post(f"{fallback_worker.endpoint_url}/api/v1/workloads/execute", json=spec.model_dump(mode='json'), timeout=60.0)
                                 resp.raise_for_status()
                                 result = WorkloadExecutionResult(**resp.json())
-                                self.workload_registry.update_state(workload_id, WorkloadState.COMPLETED if result.success else WorkloadState.FAILED)
+                                self.workload_registry.update_state(
+                                    workload_id, 
+                                    WorkloadState.COMPLETED if result.success else WorkloadState.FAILED,
+                                    error_message=None if result.success else result.error_message
+                                )
                                 return
                             except Exception as e2:
+                                logger.error(f"Fallback Exception: {e2!r}")
                                 self.workload_registry.update_state(workload_id, WorkloadState.FAILED, error_message=str(e2))
 

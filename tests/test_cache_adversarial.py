@@ -44,14 +44,14 @@ from aidars.cache import (
     SQLiteMetadataIndex,
     VerificationReport,
 )
-from aidars.scene_intelligence.cache import (
+from aidars.adapters.blender.intelligence.cache import (
     SceneCache,
     SceneCacheEntry,
     hash_blend_file,
     hash_json_payload,
     hash_source,
 )
-from aidars.scene_intelligence.scene_engine import (
+from aidars.adapters.blender.intelligence.scene_engine import (
     SceneEngine,
     SceneEngineRequest,
     SceneEngineResult,
@@ -413,8 +413,8 @@ class AdversarialASTDecouplingSuiteTests(unittest.TestCase):
             "bmesh",
             "mathutils",
             "bpy_extras",
-            "aidars.visibility",
-            "aidars.scene_intelligence.blender_scripts",
+            "aidars.adapters.blender.visibility",
+            "aidars.adapters.blender.intelligence.blender_scripts",
         }
 
         py_files = list(cache_dir.glob("*.py"))
@@ -530,10 +530,10 @@ class AdversarialCacheStressTests(unittest.TestCase):
 
     def setUp(self) -> None:
         import unittest.mock
-        from aidars.smart_package.models import PackageIntegrityReport
+        from aidars.adapters.blender.packaging.models import PackageIntegrityReport
 
         self.patcher = unittest.mock.patch(
-            "aidars.smart_package.validator.PackageValidator.validate",
+            "aidars.adapters.blender.packaging.validator.PackageValidator.validate",
             return_value=PackageIntegrityReport(
                 verified=True,
                 asset_count=0,

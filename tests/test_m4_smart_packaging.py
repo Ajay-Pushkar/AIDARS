@@ -25,22 +25,22 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from aidars.scene_intelligence.dependency_graph import (
+from aidars.adapters.blender.intelligence.dependency_graph import (
     DependencyGraph,
     DependencyGraphBuilder,
     GraphEdge,
     GraphNode,
 )
-from aidars.scene_intelligence.scene_engine import (
+from aidars.adapters.blender.intelligence.scene_engine import (
     SceneEngine,
     SceneEngineRequest,
     SceneEngineResult,
 )
-from aidars.smart_package.builder import (
+from aidars.adapters.blender.packaging.builder import (
     PackageBuilder,
     PackagePlanner,
 )
-from aidars.smart_package.models import (
+from aidars.adapters.blender.packaging.models import (
     AssetRecord,
     AssetStatus,
     AssetType,
@@ -49,13 +49,13 @@ from aidars.smart_package.models import (
     PackageStatistics,
     SelectionReason,
 )
-from aidars.smart_package.resolver import (
+from aidars.adapters.blender.packaging.resolver import (
     DependencyClosureResolver,
     PhysicalAssetResolver,
     RequirementResolver,
 )
-from aidars.smart_package.validator import PackageValidator
-from aidars.visibility.models import RenderRequest, RenderRequirementReport
+from aidars.adapters.blender.packaging.validator import PackageValidator
+from aidars.adapters.blender.visibility.models import RenderRequest, RenderRequirementReport
 
 
 def _make_report(**overrides) -> RenderRequirementReport:
@@ -1239,8 +1239,8 @@ class SceneEngineM4IntegrationTests(unittest.TestCase):
     """Integration tests for SceneEngine running Milestone 4 Smart Packaging."""
     def setUp(self):
         import unittest.mock
-        from aidars.smart_package.models import PackageIntegrityReport
-        self.patcher = unittest.mock.patch("aidars.smart_package.validator.PackageValidator.validate", return_value=PackageIntegrityReport(verified=True, asset_count=0, verified_count=0, failed_assets=[], missing_assets=[]))
+        from aidars.adapters.blender.packaging.models import PackageIntegrityReport
+        self.patcher = unittest.mock.patch("aidars.adapters.blender.packaging.validator.PackageValidator.validate", return_value=PackageIntegrityReport(verified=True, asset_count=0, verified_count=0, failed_assets=[], missing_assets=[]))
         self.patcher.start()
         
     def tearDown(self):

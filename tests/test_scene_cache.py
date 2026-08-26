@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from aidars.scene_intelligence.cache import (
+from aidars.adapters.blender.intelligence.cache import (
     SceneCache,
     SceneCacheEntry,
     hash_blend_file,

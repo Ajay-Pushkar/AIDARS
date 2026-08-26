@@ -2,7 +2,7 @@
 
 Executed inside Blender's embedded Python runtime (see inspect_scene.py).
 Produces the ``metadata`` block of the AIDARS scene payload, matching the
-schema consumed by ``aidars.scene_intelligence.builders.MetadataBuilder``.
+schema consumed by ``aidars.adapters.blender.intelligence.builders.MetadataBuilder``.
 """
 from __future__ import annotations
 

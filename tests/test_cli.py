@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from aidars.scene_intelligence.cli import main
+from aidars.adapters.blender.intelligence.cli import main
 
 SAMPLE_SCENE = {
     "metadata": {"name": "Demo", "frame_start": 1, "frame_end": 24, "fps": 24},

@@ -1,7 +1,7 @@
 """AIDARS Scene Inspection Entry Point.
 
 Executed inside Blender's embedded Python runtime (see
-aidars.scene_intelligence.blender_adapter.BlenderAdapter). This file is
+aidars.adapters.blender.intelligence.blender_adapter.BlenderAdapter). This file is
 orchestration only: call extractors, assemble the payload, print it.
 
 No business logic, transformation, or validation lives here - that all

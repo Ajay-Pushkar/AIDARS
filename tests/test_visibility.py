@@ -5,8 +5,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from aidars.scene_intelligence.engine import SceneIntelligenceEngine
-from aidars.visibility.engine import VisibilityAnalyzer, VisibilityEngine
+from aidars.adapters.blender.intelligence.engine import SceneIntelligenceEngine
+from aidars.adapters.blender.visibility.engine import VisibilityAnalyzer, VisibilityEngine
 
 
 def _object(name: str, obj_id: str, *, hide_render: bool = False, animation: dict | None = None) -> dict:
@@ -234,7 +234,7 @@ class VisibilityEngineTests(unittest.TestCase):
 
     def test_dependency_graph_object_input(self) -> None:
         """Verify VisibilityEngine.analyze handles typed DependencyGraph and SceneSnapshot objects."""
-        from aidars.scene_intelligence.dependency_graph import DependencyGraphBuilder
+        from aidars.adapters.blender.intelligence.dependency_graph import DependencyGraphBuilder
 
         engine = SceneIntelligenceEngine()
         snapshot = engine.analyze_scene_data(self.scene_payload)

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, List, Optional, Set
 from .models import VisibilityReport, VisibilityState
 
 if TYPE_CHECKING:
-    from aidars.scene_intelligence.models import AnimationCurveInfo, SceneObject, SceneSnapshot
+    from aidars.adapters.blender.intelligence.models import AnimationCurveInfo, SceneObject, SceneSnapshot
 
 _HIDE_RENDER_DATA_PATH = "hide_render"
 _HIDDEN_THRESHOLD = 0.5

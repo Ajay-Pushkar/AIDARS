@@ -8,12 +8,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from aidars.scene_intelligence.engine import SceneIntelligenceEngine
-from aidars.scene_intelligence.exporters import JsonSceneExporter
-from aidars.scene_intelligence.dependency_graph import DependencyGraphBuilder
-from aidars.scene_intelligence.loader import SceneLoader
-from aidars.scene_intelligence.scanner import SceneScanner
-from aidars.scene_intelligence.blender_adapter import BlenderAdapter
+from aidars.adapters.blender.intelligence.engine import SceneIntelligenceEngine
+from aidars.adapters.blender.intelligence.exporters import JsonSceneExporter
+from aidars.adapters.blender.intelligence.dependency_graph import DependencyGraphBuilder
+from aidars.adapters.blender.intelligence.loader import SceneLoader
+from aidars.adapters.blender.intelligence.scanner import SceneScanner
+from aidars.adapters.blender.intelligence.blender_adapter import BlenderAdapter
 
 
 class SceneIntelligenceEngineTests(unittest.TestCase):

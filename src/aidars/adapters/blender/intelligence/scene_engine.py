@@ -20,20 +20,20 @@ from .engine import SceneIntelligenceEngine
 from .exporters import DependencyGraphExporter, JsonSceneExporter
 from .integrity import IntegrityChecker, IntegrityReport
 from .models import SceneData, SceneSnapshot
-from aidars.scheduler.frame_scheduler import FrameScheduler, SchedulingPlan
-from aidars.smart_package.builder import (
+from aidars.adapters.blender.strategies.frame_scheduler import FrameScheduler, SchedulingPlan
+from aidars.adapters.blender.packaging.builder import (
     PackageBuilder,
     PackagePlanner,
 )
 
-from aidars.smart_package.models import PackageIntegrityReport, PackagePlan
-from aidars.smart_package.resolver import (
+from aidars.adapters.blender.packaging.models import PackageIntegrityReport, PackagePlan
+from aidars.adapters.blender.packaging.resolver import (
     DependencyClosureResolver,
     PhysicalAssetResolver,
     RequirementResolver,
 )
-from aidars.smart_package.validator import PackageValidator
-from aidars.visibility import (
+from aidars.adapters.blender.packaging.validator import PackageValidator
+from aidars.adapters.blender.visibility import (
     RenderRequest,
     RenderRequirementAnalyzer,
     RenderRequirementReport,

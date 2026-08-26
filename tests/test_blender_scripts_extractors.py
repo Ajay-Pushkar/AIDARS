@@ -7,7 +7,7 @@ have no real Blender binary available in CI/sandbox, so this module builds a
 minimal, structurally-faithful fake of the ``bpy`` API and:
 
 1. Verifies each extractor produces the shape expected by
-   ``aidars.scene_intelligence.builders``.
+   ``aidars.adapters.blender.intelligence.builders``.
 2. Feeds that output through the *real* builders to catch schema drift
    between the extractors and the builders early, without needing Blender.
 """
@@ -23,7 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
-BLENDER_SCRIPTS_DIR = SRC_DIR / "aidars" / "scene_intelligence" / "blender_scripts"
+BLENDER_SCRIPTS_DIR = SRC_DIR / "aidars" / "adapters" / "blender" / "intelligence" / "blender_scripts"
 
 sys.path.insert(0, str(SRC_DIR))
 # Mirrors how Blender inserts the executed script's own directory into
@@ -213,7 +213,7 @@ class BlenderExtractorTests(unittest.TestCase):
         self.assertAlmostEqual(metadata["fps"], 30 / 1.001, places=3)
         self.assertEqual(metadata["render_engine"], "CYCLES")
 
-        from aidars.scene_intelligence.builders import MetadataBuilder
+        from aidars.adapters.blender.intelligence.builders import MetadataBuilder
 
         built = MetadataBuilder().build(metadata)
         self.assertEqual(built.name, "TestScene")
@@ -225,7 +225,7 @@ class BlenderExtractorTests(unittest.TestCase):
         self.assertIsNone(by_name["Main"]["parent"])
         self.assertEqual(by_name["Props"]["parent"], "Main")
 
-        from aidars.scene_intelligence.builders import CollectionBuilder
+        from aidars.adapters.blender.intelligence.builders import CollectionBuilder
 
         built = CollectionBuilder().build(collections)
         self.assertEqual({c.name for c in built}, {"Main", "Props"})
@@ -276,7 +276,7 @@ class BlenderExtractorTests(unittest.TestCase):
         # not a zero-value dict (that default lives in ObjectBuilder only).
         self.assertIsNone(camera["animation"])
 
-        from aidars.scene_intelligence.builders import ObjectBuilder
+        from aidars.adapters.blender.intelligence.builders import ObjectBuilder
 
         built = ObjectBuilder().build(objects)
         built_chair = next(o for o in built if o.name == "Chair")
@@ -351,7 +351,7 @@ class InspectSceneMainTests(unittest.TestCase):
         self.assertEqual(payload["inspection"]["blender_version"], [4, 5, 0])
 
         # And it must round-trip cleanly through BlenderAdapter's builder pipeline.
-        from aidars.scene_intelligence.blender_adapter import BlenderAdapter
+        from aidars.adapters.blender.intelligence.blender_adapter import BlenderAdapter
 
         scene_data = BlenderAdapter()._build_scene_data(payload)
         self.assertEqual(scene_data.metadata.name, "MainScene")

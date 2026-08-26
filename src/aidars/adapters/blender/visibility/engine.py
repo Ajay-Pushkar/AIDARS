@@ -13,7 +13,7 @@ from .models import (
 )
 
 if TYPE_CHECKING:
-    from aidars.scene_intelligence.models import SceneObject, SceneSnapshot
+    from aidars.adapters.blender.intelligence.models import SceneObject, SceneSnapshot
 
 
 class VisibilityEngine:

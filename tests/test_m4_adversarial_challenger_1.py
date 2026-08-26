@@ -29,9 +29,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from aidars.scene_intelligence.dependency_graph import DependencyGraph, GraphEdge, GraphNode
-from aidars.smart_package.builder import PackageBuilder, PackagePlanner
-from aidars.smart_package.models import (
+from aidars.adapters.blender.intelligence.dependency_graph import DependencyGraph, GraphEdge, GraphNode
+from aidars.adapters.blender.packaging.builder import PackageBuilder, PackagePlanner
+from aidars.adapters.blender.packaging.models import (
     AssetRecord,
     AssetStatus,
     AssetType,
@@ -39,8 +39,8 @@ from aidars.smart_package.models import (
     PackageStatistics,
     SelectionReason,
 )
-from aidars.smart_package.resolver import PhysicalAssetResolver
-from aidars.smart_package.validator import PackageValidator
+from aidars.adapters.blender.packaging.resolver import PhysicalAssetResolver
+from aidars.adapters.blender.packaging.validator import PackageValidator
 
 
 class TestPhysicalAssetResolverAdversarialPathEdgeCases(unittest.TestCase):

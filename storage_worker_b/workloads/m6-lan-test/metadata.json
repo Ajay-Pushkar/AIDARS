@@ -1,0 +1,14 @@
+{
+  "workload_id": "m6-lan-test",
+  "task_type": "shell",
+  "input_asset_hashes": [],
+  "min_cpu_cores": 6,
+  "min_ram_bytes": 1073741824,
+  "requires_gpu": false,
+  "min_vram_bytes": 0,
+  "estimated_duration_seconds": 10.0,
+  "priority": 100,
+  "parameters": {
+    "command": "python -c \"import time; time.sleep(5); open('out.txt', 'w').write('survived')\""
+  }
+}
