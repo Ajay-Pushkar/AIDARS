@@ -355,8 +355,13 @@ class DistributedWorker:
                     error_message=f"No candidate sources holding asset {unres_h}",
                 )
                 self.metrics_tracker.record_transfer_failure(unres_h)
-
+        
         return results
+
+    async def checkpoint_workload(self, workload_id: str) -> bool:
+        """Request the ExecutionManager to gracefully checkpoint an active workload."""
+        logger.info("Worker %s received checkpoint request for workload %s", self.worker_id, workload_id)
+        return await self.execution_manager.checkpoint_workload(workload_id)
 
     # ========================================================================
     # Workload Execution

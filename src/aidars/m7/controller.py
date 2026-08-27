@@ -10,6 +10,8 @@ from aidars.m7.features import FeatureExtractor
 from aidars.m7.behavior import BehaviorInferencer
 from aidars.m7.prediction import PerformancePredictor
 from aidars.m7.risk import PlacementRiskEvaluator, RiskScore
+from aidars.m7.anomaly import AnomalyDetector
+from aidars.m7.policy import AdaptivePolicyEngine
 
 class M7OrchestratorBridge:
     """The intelligence bridge between M6 execution and M7 understanding.
@@ -43,13 +45,14 @@ class M7OrchestratorBridge:
             temporal = self.memory.get_worker_state(candidate.worker_id)
             
             # 4. Extract worker features
-            w_features = FeatureExtractor.extract_worker_features(candidate, temporal, network_max_ram)
+            w_features = FeatureExtractor.extract_worker_features(candidate, temporal, workload)
             
             # 5. Infer worker behavior
             w_behavior = BehaviorInferencer.infer_worker_behavior(candidate.worker_id, w_features)
             
             # 6. Predict outcome
-            prediction = PerformancePredictor.predict(w_features, wl_features, w_behavior, wl_behavior)
+            wl_temporal = self.memory.get_workload_state(workload.task_type)
+            prediction = PerformancePredictor.predict(w_features, wl_features, w_behavior, wl_behavior, worker_temporal=temporal, workload_temporal=wl_temporal)
             
             # 7. Evaluate risk
             risk = PlacementRiskEvaluator.evaluate(
@@ -62,25 +65,28 @@ class M7OrchestratorBridge:
             
         return risk_scores
         
-    def adjust_ranking(self, original_ranking: List[str], intelligence: Dict[str, RiskScore], risk_weight: float = 0.2) -> List[str]:
+    def adjust_ranking(self, original_scores: Dict[str, float], intelligence: Dict[str, RiskScore], risk_weight: float = 0.5) -> List[str]:
         """Adjusts the M6 candidate ranking using M7 risk scores as a soft penalty."""
         
-        # If no intelligence, return original
         if not intelligence:
-            return original_ranking
+            # Sort by original score descending
+            return sorted(original_scores.keys(), key=lambda w_id: original_scores[w_id], reverse=True)
             
-        def get_adjusted_score(worker_id: str, original_index: int) -> float:
-            # Base score: closer to 0 is better (rank)
-            base_score = float(original_index)
-            
-            # Risk penalty: [0.0, 1.0] scaled by the length of the list to be meaningful
+        # Extract cluster anomaly state to drive policy weights
+        active_workers = list(self.memory.workers.values())
+        policy = AdaptivePolicyEngine.evaluate_environment(active_workers)
+        
+        # Override the base risk weight with the policy's risk_weight factor
+        effective_lambda = risk_weight * policy.risk_weight
+        
+        final_scores = {}
+        for worker_id, m6_score in original_scores.items():
             risk = intelligence.get(worker_id)
-            risk_penalty = 0.0
             if risk:
-                # E.g. max penalty moves it down `len(original_ranking) * risk_weight` spots
-                risk_penalty = risk.total_risk * len(original_ranking) * risk_weight * 5.0 
+                # S_final = S_M6 - lambda * R_M7
+                final_scores[worker_id] = m6_score - (effective_lambda * risk.total_risk)
+            else:
+                final_scores[worker_id] = m6_score
                 
-            return base_score + risk_penalty
-            
-        # Re-sort candidates based on adjusted score
-        return sorted(original_ranking, key=lambda w_id: get_adjusted_score(w_id, original_ranking.index(w_id)))
+        # Sort by final score descending
+        return sorted(final_scores.keys(), key=lambda w_id: final_scores[w_id], reverse=True)

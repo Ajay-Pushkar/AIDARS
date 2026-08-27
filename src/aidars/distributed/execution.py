@@ -25,6 +25,7 @@ class ExecutionManager:
     def __init__(self, cas_adapter: LocalCASAdapter, workloads_dir: str) -> None:
         self.cas = cas_adapter
         self.workloads_dir = os.path.abspath(workloads_dir)
+        self.active_runtimes: Dict[str, RuntimeAdapter] = {}
         os.makedirs(self.workloads_dir, exist_ok=True)
 
     async def execute_workload(
@@ -99,6 +100,8 @@ class ExecutionManager:
         timeout_seconds = spec.estimated_duration_seconds * 3.0
         start_time = time.time()
         
+        self.active_runtimes[workload_id] = runtime
+        
         try:
             success, stdout_snip, stderr_snip = await asyncio.wait_for(
                 runtime.execute(spec, workdir), timeout=timeout_seconds
@@ -111,6 +114,8 @@ class ExecutionManager:
             success = False
             stdout_snip = None
             stderr_snip = f"Runtime error: {exc}"
+        finally:
+            self.active_runtimes.pop(workload_id, None)
             
         duration = time.time() - start_time
 
@@ -141,13 +146,25 @@ class ExecutionManager:
         except Exception as e:
             logger.warning(f"Failed to cleanup workdir {workdir}: {e}")
 
+        was_checkpointed = getattr(runtime, "_checkpoint_requested", False)
+        
         return WorkloadExecutionResult(
             workload_id=workload_id,
             worker_id=worker_id,
-            success=success,
+            success=success or was_checkpointed,
             output_asset_hashes=output_hashes,
             execution_duration_seconds=duration,
-            error_message=None if success else "Execution failed",
+            error_message=None if (success or was_checkpointed) else "Execution failed",
             stdout_snippet=stdout_snip,
             stderr_snippet=stderr_snip,
+            was_checkpointed=was_checkpointed,
+            checkpoint_hash=next(iter(output_hashes)) if (was_checkpointed and output_hashes) else None
         )
+
+    async def checkpoint_workload(self, workload_id: str) -> bool:
+        """Trigger a checkpoint for a running workload."""
+        runtime = self.active_runtimes.get(workload_id)
+        if runtime:
+            await runtime.checkpoint()
+            return True
+        return False

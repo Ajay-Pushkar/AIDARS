@@ -19,10 +19,11 @@ logger = logging.getLogger(__name__)
 class WorkloadOrchestrator:
     """Central orchestrator for workload lifecycle on the Coordinator."""
 
-    def __init__(self, registry: WorkerRegistry, workload_registry: WorkloadRegistry) -> None:
+    def __init__(self, registry: WorkerRegistry, workload_registry: WorkloadRegistry, m7_bridge=None, m7_ingestor=None) -> None:
         self.registry = registry
         self.workload_registry = workload_registry
-        self.placement_engine = PlacementEngine()
+        self.m7_ingestor = m7_ingestor
+        self.placement_engine = PlacementEngine(m7_bridge=m7_bridge)
 
     async def submit_workload(self, spec: WorkloadSpec) -> str:
         """Submit a new workload for execution. Returns the workload_id."""
@@ -68,6 +69,7 @@ class WorkloadOrchestrator:
                     ram_total_bytes=info.capacity_bytes or 8_000_000_000,
                     ram_available_bytes=info.available_bytes,
                     active_workload_count=0, # Placeholder
+                    status=info.status,
                     local_cached_hashes=info.inventory_hashes,
                     timestamp_utc=time.time(),
                 ))
@@ -97,10 +99,29 @@ class WorkloadOrchestrator:
                 result_data = resp.json()
                 result = WorkloadExecutionResult(**result_data)
                 
-                if result.success:
+                if result.was_checkpointed:
+                    logger.warning(f"Workload {workload_id} was checkpointed on {decision.selected_worker_id}. Migrating...")
+                    self.workload_registry.update_state(workload_id, WorkloadState.MIGRATING)
+                    
+                    if result.checkpoint_hash:
+                        spec.input_asset_hashes.add(result.checkpoint_hash)
+                        spec.parameters["resume_from_checkpoint"] = result.checkpoint_hash
+                        
+                    # Resubmit workload for migration
+                    asyncio.create_task(self._process_workload(workload_id))
+                    return
+                elif result.success:
                     self.workload_registry.update_state(workload_id, WorkloadState.COMPLETED)
                 else:
                     self.workload_registry.update_state(workload_id, WorkloadState.FAILED, error_message=result.error_message)
+                
+                if self.m7_ingestor:
+                    self.m7_ingestor.on_workload_completed(
+                        workload_type=spec.task_type,
+                        duration=result.execution_duration_seconds,
+                        ram_peak=1024,
+                        failed=not result.success
+                    )
             except Exception as e:
                 logger.error(f"Failed to dispatch workload {workload_id} to worker {decision.selected_worker_id}: {e}")
                 self.workload_registry.update_state(workload_id, WorkloadState.FAILED, error_message=str(e))
@@ -124,8 +145,44 @@ class WorkloadOrchestrator:
                                     WorkloadState.COMPLETED if result.success else WorkloadState.FAILED,
                                     error_message=None if result.success else result.error_message
                                 )
+                                if self.m7_ingestor:
+                                    self.m7_ingestor.on_workload_completed(
+                                        workload_type=spec.task_type,
+                                        duration=result.execution_duration_seconds,
+                                        ram_peak=1024,
+                                        failed=not result.success
+                                    )
                                 return
                             except Exception as e2:
                                 logger.error(f"Fallback Exception: {e2!r}")
                                 self.workload_registry.update_state(workload_id, WorkloadState.FAILED, error_message=str(e2))
+
+    async def drain_worker(self, worker_id: str) -> None:
+        """Trigger migration for all executing workloads on a specific worker."""
+        # Find all workloads currently running on this worker
+        with self.workload_registry._lock:
+            active_workloads = [
+                wid for wid, record in self.workload_registry._workloads.items()
+                if record.state == WorkloadState.PLACED and record.placement and record.placement.selected_worker_id == worker_id
+            ]
+        
+        if not active_workloads:
+            return
+            
+        logger.info(f"Draining worker {worker_id}. Triggering checkpoint for {len(active_workloads)} workloads.")
+        
+        worker_info = self.registry.get_worker(worker_id)
+        if not worker_info:
+            return
+            
+        client = getattr(self, 'http_client', httpx.AsyncClient())
+        url = f"{worker_info.endpoint_url}/api/v1/workloads"
+        
+        for wid in active_workloads:
+            try:
+                # Fire and forget the checkpoint request; the worker will abort and the 
+                # blocked _process_workload loop will receive the checkpoint result and migrate it.
+                await client.post(f"{url}/{wid}/checkpoint", timeout=10.0)
+            except Exception as e:
+                logger.error(f"Failed to trigger checkpoint for {wid} on {worker_id}: {e}")
 

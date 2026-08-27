@@ -58,7 +58,8 @@ def test_adversarial_memory_poisoning_isolation():
     
     # If M6 initially ranked w-poisoned higher (because it seemed identical statically),
     # M7 must adjust the ranking to put w-normal first.
-    adjusted = bridge.adjust_ranking(["w-poisoned", "w-normal"], scores, risk_weight=1.0)
+    m6_scores = {"w-poisoned": 10.0, "w-normal": 9.9}
+    adjusted = bridge.adjust_ranking(m6_scores, scores, risk_weight=1.0)
     assert adjusted == ["w-normal", "w-poisoned"]
 
 def test_adversarial_oracle_denial():

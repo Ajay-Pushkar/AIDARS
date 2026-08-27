@@ -103,3 +103,17 @@ class TelemetryMemory:
         
     def get_workload_state(self, workload_type: str) -> Optional[WorkloadTemporalState]:
         return self.workloads.get(workload_type)
+
+class TelemetryIngestor:
+    """Ingests raw M6 metrics and translates them into M7 telemetry updates."""
+    def __init__(self, memory: TelemetryMemory):
+        self.memory = memory
+        
+    def on_worker_heartbeat(self, worker_id: str, cpu_utilization_percent: float, ram_total: int, ram_available: int, failed: bool = False, latency_ms: float = 0.0):
+        cpu_ratio = max(0.0, 1.0 - (cpu_utilization_percent / 100.0))
+        rt = ram_total if ram_total > 0 else 1.0
+        ram_ratio = max(0.0, ram_available / rt)
+        self.memory.ingest_worker_metrics(worker_id, cpu_ratio, ram_ratio, latency_ms, failed)
+        
+    def on_workload_completed(self, workload_type: str, duration: float, ram_peak: float, failed: bool):
+        self.memory.ingest_workload_result(workload_type, duration, ram_peak, failed)

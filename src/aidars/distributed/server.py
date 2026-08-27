@@ -245,6 +245,15 @@ class WorkerServer:
             result = await self.distributed_worker.execute_workload(spec)
             return result
 
+        @router.post("/api/v1/workloads/{workload_id}/checkpoint")
+        async def checkpoint_workload_endpoint(workload_id: str) -> Dict[str, Any]:
+            if not self.distributed_worker:
+                raise HTTPException(status_code=500, detail="Worker instance not linked to server")
+            success = await self.distributed_worker.checkpoint_workload(workload_id)
+            if not success:
+                raise HTTPException(status_code=404, detail="Workload not found or could not be checkpointed")
+            return {"status": "checkpointing"}
+
         app.include_router(router)
         return app
 

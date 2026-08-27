@@ -18,14 +18,25 @@ def test_extract_worker_features():
         vram_total_bytes=0,
         vram_available_bytes=0,
         active_workload_count=2,
-        local_cached_hashes={"hash1", "hash2"}
+        local_cached_hashes={"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3"}
     )
     
     temporal_state = WorkerTemporalState(worker_id="w-1")
     temporal_state.failure_rate_ema.value = 0.1
     temporal_state.latency_ema.value = 150.0  # 150ms
     
-    features = FeatureExtractor.extract_worker_features(profile, temporal_state, network_max_ram=32000)
+    spec = WorkloadSpec(
+        workload_id="wl-1",
+        task_type="m6-lan-test",
+        min_cpu_cores=4,
+        min_ram_bytes=4000,
+        requires_gpu=True,
+        input_asset_hashes={"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "c3ab8ff13720e8ad9047dd39466b3c8974e592c2fa383d4a3960714caef0c4f2"},
+        priority=80,
+        estimated_duration_seconds=1800.0
+    )
+    
+    features = FeatureExtractor.extract_worker_features(profile, temporal_state, spec)
     
     # 1.0 - 0.25 = 0.75
     assert features.cpu_available_ratio == 0.75
@@ -35,8 +46,8 @@ def test_extract_worker_features():
     
     # Active workload count: 2 / 10 = 0.2
     assert features.active_workload_ratio == 0.2
-    # Cached hashes: 2 / 100 = 0.02
-    assert features.cache_locality_ratio == 0.02
+    # Cached hashes: Requires hash1, hash3. Has hash1, hash2. Intersection=1. 1/2 = 0.5
+    assert features.cache_locality_ratio == 0.5
     
     # Telemetry
     assert features.recent_failure_rate == 0.1

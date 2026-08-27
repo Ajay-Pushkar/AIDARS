@@ -57,8 +57,8 @@ def test_adjust_ranking():
     """Test soft penalty adjustment."""
     bridge = M7OrchestratorBridge(TelemetryMemory())
     
-    original_ranking = ["w-risky", "w-safe"]
-    
+    original_ranking = {"w-risky": 10.0, "w-safe": 9.9}
+
     intelligence = {
         "w-risky": RiskScore(0.9, 0.5, 0.9, 0.9, 0.9),  # Extremely risky
         "w-safe": RiskScore(0.0, 0.1, 0.0, 0.0, 0.05)   # Very safe

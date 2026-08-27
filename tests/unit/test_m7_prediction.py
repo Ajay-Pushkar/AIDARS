@@ -37,7 +37,7 @@ def test_predict_ideal_conditions():
     assert res.failure_probability == 0.0
     assert res.predicted_duration_seconds == 10.0
     assert res.predicted_ram_peak_bytes == 1024 * 1024 * 1024
-    assert res.confidence == 0.9 * 0.8 * 1.0  # 0.72
+    assert res.confidence == 0.3  # Cold start penalty
 
 def test_predict_gpu_bound_on_cpu_worker():
     """Test prediction properly spikes failure rate if GPU is required but missing."""

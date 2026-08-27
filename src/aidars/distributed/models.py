@@ -84,6 +84,7 @@ class WorkerStatus(str, Enum):
     ACTIVE = "active"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
+    DRAINING = "draining"
     OFFLINE = "offline"
 
 
@@ -579,7 +580,7 @@ class WorkloadSpec(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     workload_id: str = Field(..., min_length=1, max_length=128)
-    task_type: str = Field(..., min_length=1, max_length=64)  # e.g., "blender_render", "scene_eval"
+    task_type: str = Field(..., min_length=1, max_length=64)  # e.g., "compute", "simulation", "render", "analysis"
     input_asset_hashes: Set[str] = Field(default_factory=set)
 
     min_cpu_cores: int = Field(default=1, ge=1)
@@ -618,6 +619,8 @@ class WorkerResourceProfile(BaseModel):
     vram_available_bytes: int = Field(default=0, ge=0)
 
     active_workload_count: int = Field(default=0, ge=0)
+    max_concurrent_workloads: int = Field(default=10, ge=1)
+    status: WorkerStatus = Field(default=WorkerStatus.ACTIVE)
     local_cached_hashes: Set[str] = Field(default_factory=set)
     timestamp_utc: float = Field(default_factory=time.time)
 
@@ -647,4 +650,6 @@ class WorkloadExecutionResult(BaseModel):
     error_message: Optional[str] = None
     stdout_snippet: Optional[str] = None
     stderr_snippet: Optional[str] = None
+    was_checkpointed: bool = Field(default=False)
+    checkpoint_hash: Optional[str] = None
 

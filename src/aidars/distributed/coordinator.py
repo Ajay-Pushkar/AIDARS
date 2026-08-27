@@ -31,6 +31,8 @@ from aidars.distributed.models import (
     WorkloadSpec,
     validate_sha256_hex,
 )
+from aidars.m7.telemetry import TelemetryMemory, TelemetryIngestor
+from aidars.m7.controller import M7OrchestratorBridge
 from aidars.distributed.prioritizer import CandidatePrioritizer, LatencyTracker
 from aidars.distributed.registry import ClusterStats, WorkerRegistry
 from aidars.distributed.workload_registry import WorkloadRegistry, WorkloadRecord
@@ -65,11 +67,23 @@ class CoordinatorService:
             heartbeat_timeout_seconds=self.heartbeat_timeout_seconds
         )
         self.workload_registry = WorkloadRegistry()
-        self.orchestrator = WorkloadOrchestrator(self.registry, self.workload_registry)
+        
+        # M7 Intelligence Initialization
+        self.m7_memory = TelemetryMemory()
+        self.m7_ingestor = TelemetryIngestor(self.m7_memory)
+        self.m7_bridge = M7OrchestratorBridge(self.m7_memory)
+        
+        self.orchestrator = WorkloadOrchestrator(
+            self.registry, 
+            self.workload_registry, 
+            m7_bridge=self.m7_bridge,
+            m7_ingestor=self.m7_ingestor
+        )
 
         self._start_time_utc = time.time()
-        self._running = False
+        self._running: bool = False
         self._eviction_task: Optional[asyncio.Task] = None
+        self._health_task: Optional[asyncio.Task] = None
         self.app: FastAPI = self._create_fastapi_app()
 
     # ========================================================================
@@ -82,6 +96,7 @@ class CoordinatorService:
             return
         self._running = True
         self._eviction_task = asyncio.create_task(self._run_eviction_loop())
+        self._health_task = asyncio.create_task(self._evaluate_cluster_health_loop())
         logger.info("CoordinatorService %s started.", self.coordinator_id)
 
     async def stop(self) -> None:
@@ -96,6 +111,15 @@ class CoordinatorService:
             except asyncio.CancelledError:
                 pass
             self._eviction_task = None
+            
+        if self._health_task:
+            self._health_task.cancel()
+            try:
+                await self._health_task
+            except asyncio.CancelledError:
+                pass
+            self._health_task = None
+
         logger.info("CoordinatorService %s stopped.", self.coordinator_id)
 
     async def _run_eviction_loop(self) -> None:
@@ -126,6 +150,57 @@ class CoordinatorService:
                 break
             except Exception as exc:
                 logger.error("Error in coordinator background eviction loop: %s", exc, exc_info=True)
+
+    async def _evaluate_cluster_health_loop(self) -> None:
+        """Periodic loop that evaluates M7 predictive anomalies to drain unhealthy workers."""
+        from aidars.m7.policy import AdaptivePolicyEngine
+        from aidars.m7.controller import M7OrchestratorBridge
+        from aidars.distributed.models import WorkerStatus
+        from aidars.m7.behavior import BehaviorInferencer
+        from aidars.m7.contracts import WorkerState as M7WorkerState
+        
+        while self._running:
+            try:
+                await asyncio.sleep(self.eviction_interval_seconds)
+                if not self._running:
+                    break
+                    
+                # Evaluate cluster policy using M7 memory
+                active_workers = list(self.m7_memory.workers.values())
+                print(f"DEBUG LOOP: Evaluated {len(active_workers)} active workers")
+                
+                # Check for Early Warnings (M7.16)
+                for worker_state in active_workers:
+                    # Construct features from temporal state directly for health check
+                    from aidars.m7.contracts import WorkerFeatureVector
+                    
+                    features = WorkerFeatureVector(
+                        cpu_available_ratio=1.0 - worker_state.cpu_utilization_ema.value,
+                        ram_available_ratio=1.0 - worker_state.ram_utilization_ema.value,
+                        vram_available_ratio=1.0,
+                        has_gpu=0.0,
+                        active_workload_ratio=0.0,
+                        cache_locality_ratio=0.0,
+                        heartbeat_stability=1.0,
+                        recent_failure_rate=worker_state.failure_rate_ema.value,
+                        recent_latency_normalized=min(1.0, worker_state.latency_ema.value / 100.0),
+                        throughput_normalized=0.5
+                    )
+                    
+                    behavior = BehaviorInferencer.infer_worker_behavior(worker_state.worker_id, features)
+                    
+                    if behavior.state in (M7WorkerState.DEGRADED, M7WorkerState.ERRATIC, M7WorkerState.OVERLOADED):
+                        # Mark worker as DRAINING in M6 registry (M7.17)
+                        wid = worker_state.worker_id
+                        worker_info = self.registry.get_worker(wid)
+                        if worker_info and worker_info.status == WorkerStatus.ACTIVE:
+                            logger.warning(f"Worker {wid} marked as DRAINING due to M7 behavioral risk: {behavior.state.value}")
+                            self.registry._workers[wid].status = WorkerStatus.DRAINING
+                            # Kick off workload migration for all active workloads on this worker (M7.18)
+                            asyncio.create_task(self.orchestrator.drain_worker(wid))
+                                
+            except Exception as exc:
+                logger.error("Coordinator health loop error: %s", exc)
 
     # ========================================================================
     # Programmatic / Core API Methods
@@ -213,7 +288,7 @@ class CoordinatorService:
 
             worker_ids = located_map.get(norm_h)
             if not worker_ids:
-                locations[norm_h] = []
+                locations[raw_h] = []
                 unresolved_hashes.append(norm_h)
                 continue
 
@@ -224,7 +299,7 @@ class CoordinatorService:
             ]
 
             if not candidates:
-                locations[norm_h] = []
+                locations[raw_h] = []
                 unresolved_hashes.append(norm_h)
                 continue
 
@@ -232,7 +307,7 @@ class CoordinatorService:
             if max_cands and max_cands > 0:
                 candidates = candidates[:max_cands]
 
-            locations[norm_h] = [item[1] for item in candidates]
+            locations[raw_h] = [item[1] for item in candidates]
 
         return LocateAssetsResponse(
             locations=locations,
@@ -348,6 +423,18 @@ class CoordinatorService:
                     acknowledged_at_utc=now,
                     coordinator_time_utc=now,
                     re_register_required=True,
+                )
+
+            # Route to M7 Ingestor
+            worker = self.registry.get_worker(worker_id)
+            if worker and worker.last_metrics:
+                self.m7_ingestor.on_worker_heartbeat(
+                    worker_id=worker_id,
+                    cpu_utilization_percent=worker.last_metrics.cpu_percent,
+                    ram_total=worker.capacity_bytes or 0,
+                    ram_available=worker.available_bytes,
+                    failed=False,
+                    latency_ms=0.0  # TODO: compute from RTT
                 )
 
             return HeartbeatResponse(

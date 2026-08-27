@@ -3,17 +3,7 @@
 Defines global adaptive strategies that dynamically shift weights based on
 environmental conditions (e.g., network degradation).
 """
-from dataclasses import dataclass
-from typing import List
-
-@dataclass
-class PolicyWeights:
-    """Adaptive weighting recommendations for the M6 Placement Engine."""
-    compute_weight: float = 0.35
-    locality_weight: float = 0.20
-    network_weight: float = 0.15
-    risk_weight: float = 0.15
-    queue_weight: float = 0.15
+from aidars.m7.contracts import PolicyWeights
 
 class AdaptivePolicyEngine:
     """Dynamically adjusts placement weights based on global environmental conditions."""

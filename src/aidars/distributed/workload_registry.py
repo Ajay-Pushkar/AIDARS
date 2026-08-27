@@ -23,6 +23,7 @@ class WorkloadState(str, Enum):
     SYNCING_ASSETS = "syncing_assets"
     READY = "ready"
     EXECUTING = "executing"
+    MIGRATING = "migrating"
     INGESTING = "ingesting"
     COMPLETED = "completed"
     FAILED = "failed"

@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from aidars.distributed.models import (
     PlacementDecision,
     WorkerResourceProfile,
+    WorkerStatus,
     WorkloadSpec,
 )
 
@@ -48,6 +49,8 @@ class PlacementEngine:
 
         for profile in profiles:
             # Hard Constraint Filters
+            if profile.status in (WorkerStatus.DRAINING, WorkerStatus.UNHEALTHY):
+                continue
             if profile.ram_available_bytes < spec.min_ram_bytes:
                 continue
             if spec.requires_gpu and not profile.gpu_available:
@@ -111,14 +114,13 @@ class PlacementEngine:
             
         # Initial ranking (highest score first)
         original_ranking = sorted(valid_candidates, key=lambda p: candidate_scores[p.worker_id], reverse=True)
-        original_ids = [p.worker_id for p in original_ranking]
         
-        final_ids = original_ids
+        final_ids = [p.worker_id for p in original_ranking]
         
         # Inject M7 Intelligence
         if self.m7_bridge:
             intelligence = self.m7_bridge.evaluate_candidates(spec, original_ranking)
-            final_ids = self.m7_bridge.adjust_ranking(original_ids, intelligence, risk_weight=0.5)
+            final_ids = self.m7_bridge.adjust_ranking(candidate_scores, intelligence, risk_weight=0.5)
             
         # Select the top candidate after M7 adjustment
         top_worker_id = final_ids[0]
