@@ -28,6 +28,13 @@ class BlenderAdapter(ApplicationAdapter):
             source, snapshot, graph, frame_start, frame_end, worker_count
         )
 
+        # M4: resolve real physical assets and their SHA-256 hashes. Only
+        # successfully resolved assets contribute a hash; embedded/missing
+        # assets are never fabricated (AssetRecord.sha256 stays None for
+        # them). CAS ingestion of these bytes is a separate, later step.
+        asset_records = engine.resolve_required_assets(snapshot, graph, input_path)
+        input_asset_hashes = {record.sha256 for record in asset_records if record.sha256}
+
         min_vram_bytes = 4 * 1024 * 1024 * 1024 if requires_gpu else 0
 
         specs = []
@@ -35,7 +42,7 @@ class BlenderAdapter(ApplicationAdapter):
             spec = WorkloadSpec(
                 workload_id=f"blender-render-{hashlib.md5(f'{input_path}-{chunk.frame_start}-{chunk.frame_end}'.encode()).hexdigest()[:8]}",
                 task_type="blender_render",
-                input_asset_hashes=set(), # Will contain the .blend and textures
+                input_asset_hashes=input_asset_hashes,
                 min_cpu_cores=4,
                 min_ram_bytes=8 * 1024 * 1024 * 1024,
                 requires_gpu=requires_gpu,

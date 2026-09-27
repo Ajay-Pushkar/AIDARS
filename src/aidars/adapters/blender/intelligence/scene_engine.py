@@ -26,7 +26,7 @@ from aidars.adapters.blender.packaging.builder import (
     PackagePlanner,
 )
 
-from aidars.adapters.blender.packaging.models import PackageIntegrityReport, PackagePlan
+from aidars.adapters.blender.packaging.models import AssetRecord, PackageIntegrityReport, PackagePlan
 from aidars.adapters.blender.packaging.resolver import (
     DependencyClosureResolver,
     PhysicalAssetResolver,
@@ -306,6 +306,35 @@ class SceneEngine:
         """Partition a frame range across workers with estimated asset-cost per chunk."""
         assets = self._extract_raw_assets(source)
         return self.frame_scheduler.schedule(snapshot, graph, assets, frame_start, frame_end, worker_count)
+
+    def resolve_required_assets(
+        self,
+        snapshot: SceneSnapshot,
+        graph: DependencyGraph,
+        input_path: str | Path,
+    ) -> List[AssetRecord]:
+        """Resolve every asset reachable from the full dependency graph into
+        physical AssetRecord objects (path, SHA-256, size, status).
+
+        Uses the same seed strategy as run()'s default (non-visibility-
+        optimized) packaging path: every graph node is a seed, so nothing is
+        excluded by camera/frame visibility here. Physically resolved assets
+        carry a real SHA-256 in AssetRecord.sha256; embedded or missing
+        assets carry sha256=None rather than a fabricated value.
+        """
+        seed_ids = {node.identifier for node in graph.nodes}
+        closure_ids = DependencyClosureResolver.compute_closure(seed_ids, graph)
+
+        input_p = Path(input_path) if input_path else Path.cwd()
+        base_dir = input_p.parent if input_p.exists() and input_p.is_file() else Path.cwd()
+
+        return self.physical_resolver.resolve(
+            closure_ids=closure_ids,
+            graph=graph,
+            base_dir=base_dir,
+            seed_ids=seed_ids,
+            snapshot=snapshot,
+        )
 
     # ------------------------------------------------------------------ #
     # Internal helpers
