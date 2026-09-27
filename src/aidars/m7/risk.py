@@ -3,6 +3,8 @@
 Defines the risk metric used to influence M6 placement rankings without
 overriding M6 hard constraints.
 """
+from typing import Optional
+
 from aidars.m7.contracts import RiskScore
 
 class PlacementRiskEvaluator:

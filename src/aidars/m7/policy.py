@@ -3,6 +3,8 @@
 Defines global adaptive strategies that dynamically shift weights based on
 environmental conditions (e.g., network degradation).
 """
+from typing import List
+
 from aidars.m7.contracts import PolicyWeights
 
 class AdaptivePolicyEngine:

@@ -9,4 +9,4 @@ test-q:
 	$(PYTHON) -m pytest tests/ -q
 
 run-example:
-	$(PYTHON) -m aidars.scene_intelligence.cli tests/fixtures/scene_payload.json --package --frame-start 1 --frame-end 24 --package-output output/package.json
+	$(PYTHON) -m aidars.adapters.blender.intelligence.cli tests/fixtures/scene_payload.json --package --frame-start 1 --frame-end 24 --package-output output/package.json

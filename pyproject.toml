@@ -24,7 +24,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [project.scripts]
-aidars-scene = "aidars.scene_intelligence.cli:main"
+aidars-scene = "aidars.adapters.blender.intelligence.cli:main"
 
 [project.optional-dependencies]
 dev = [
