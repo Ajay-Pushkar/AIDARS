@@ -1,18 +1,21 @@
 import pytest
+from pathlib import Path
 from aidars.adapters.blender.adapter import BlenderAdapter
 from aidars.adapters.llm.adapter import LLMAdapter
 from aidars.adapters.ml_training.adapter import MLTrainingAdapter
 from aidars.distributed.models import WorkloadSpec
 
+BLENDER_FIXTURE_PATH = str(Path(__file__).resolve().parent.parent / "fixtures" / "blender_adapter_scene.json")
+
 def test_blender_adapter_produces_generic_workload():
     adapter = BlenderAdapter()
     request = {
-        "input_path": "/test/scene.blend",
+        "input_path": BLENDER_FIXTURE_PATH,
         "frame_start": 1,
         "frame_end": 250,
         "requires_gpu": True
     }
-    
+
     specs = adapter.evaluate_request(request)
     assert len(specs) == 2
     assert isinstance(specs[0], WorkloadSpec)
@@ -54,7 +57,7 @@ def test_ml_training_adapter_produces_generic_workload():
     
 def test_all_adapters_conform_to_same_contract():
     adapters = [
-        (BlenderAdapter(), {"input_path": "a"}),
+        (BlenderAdapter(), {"input_path": BLENDER_FIXTURE_PATH}),
         (LLMAdapter(), {"prompt": "b"}),
         (MLTrainingAdapter(), {"dataset": "c"})
     ]

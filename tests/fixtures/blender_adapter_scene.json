@@ -1,0 +1,23 @@
+{
+  "metadata": {"name": "Adapter Fixture Scene", "frame_start": 1, "frame_end": 24, "fps": 24},
+  "collections": [
+    {"name": "Main", "id": "col-main", "parent": null}
+  ],
+  "objects": [
+    {
+      "name": "Cube",
+      "id": "obj-1",
+      "type": "MESH",
+      "collection": "col-main",
+      "transform": {"location": [0.0, 5.0, 0.0]},
+      "bound_box": [[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]],
+      "visibility": {"hide_render": false, "hide_viewport": false},
+      "materials": [{"name": "Mat", "shader": "Principled"}]
+    }
+  ],
+  "lights": [],
+  "materials": [{"name": "Mat", "shader": "Principled"}],
+  "textures": [],
+  "images": [],
+  "assets": [{"path": "/assets/foo.png", "kind": "texture", "size_bytes": 1024}]
+}

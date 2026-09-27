@@ -1,12 +1,15 @@
 import pytest
 import asyncio
 import time
+from pathlib import Path
 from aidars.distributed.models import WorkloadSpec, WorkerInfo, WorkerCapabilities, WorkerMetrics
 from aidars.distributed.coordinator import CoordinatorService
 from aidars.distributed.cas_adapter import LocalCASAdapter
 from aidars.adapters.blender.adapter import BlenderAdapter
 from aidars.adapters.llm.adapter import LLMAdapter
 from aidars.adapters.ml_training.adapter import MLTrainingAdapter
+
+BLENDER_FIXTURE_PATH = str(Path(__file__).resolve().parent.parent / "fixtures" / "blender_adapter_scene.json")
 
 @pytest.mark.asyncio
 async def test_concurrent_cross_app_workloads(tmp_path):
@@ -65,7 +68,7 @@ async def test_concurrent_cross_app_workloads(tmp_path):
     ml = MLTrainingAdapter()
     
     # Generate specs
-    blender_specs = blender.evaluate_request({"input_path": "/test.blend", "requires_gpu": False})
+    blender_specs = blender.evaluate_request({"input_path": BLENDER_FIXTURE_PATH, "requires_gpu": False})
     llm_specs = llm.evaluate_request({"prompt": "Hello", "requires_gpu": True})
     ml_specs = ml.evaluate_request({"dataset": "mnist", "requires_gpu": True})
     
