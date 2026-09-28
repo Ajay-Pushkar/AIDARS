@@ -17,6 +17,7 @@ from aidars.distributed.models import (
     WorkerStatus,
     validate_sha256_hex,
 )
+from aidars.distributed.state_store import CoordinatorStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ class WorkerRegistry:
         degraded_threshold: float = 3.0,
         suspect_threshold: float = 10.0,
         penalty_half_life_seconds: float = 300.0,
+        state_store: Optional[CoordinatorStateStore] = None,
     ) -> None:
         self._heartbeat_timeout = float(heartbeat_timeout_seconds)
         self._degraded_threshold = float(degraded_threshold)
@@ -96,6 +98,28 @@ class WorkerRegistry:
         self._hash_index: Dict[str, Set[str]] = {}  # sha256 -> Set[worker_id]
         self._worker_hashes: Dict[str, Set[str]] = {}  # worker_id -> Set[sha256]
         self._health_records: Dict[str, WorkerHealthRecord] = {}
+
+        # Optional write-through persistence (Phase 5.2B). None (the
+        # default) preserves pure in-memory behavior exactly as before --
+        # no SQLite dependency, no schema created, unless a store is
+        # explicitly injected by the caller.
+        self._state_store = state_store
+
+    def _persist_worker(self, snapshot: Optional[WorkerInfo]) -> None:
+        """Write a worker snapshot to the state store, if one is configured.
+
+        MUST be called with self._lock already released: this performs
+        synchronous disk I/O and must never run inside the registry's
+        critical section. `snapshot` must be a deep copy taken while the
+        lock was held, so a concurrent mutation can't produce a torn write.
+        Persistence failures are not swallowed -- they propagate to the
+        caller of the mutating method that triggered this write, since the
+        in-memory state has already changed and must not be silently
+        reported as durable when it isn't.
+        """
+        if self._state_store is None or snapshot is None:
+            return
+        self._state_store.save_worker(snapshot)
 
     # ========================================================================
     # Worker Registration & Lifecycle
@@ -152,7 +176,9 @@ class WorkerRegistry:
                     record.consecutive_failures = 0
 
             logger.info("Worker registered: %s (%d hashes indexed)", wid, len(normalized_hashes))
-            return worker_copy.model_copy(deep=True)
+            snapshot = worker_copy.model_copy(deep=True)
+        self._persist_worker(snapshot)
+        return snapshot
 
     def unregister_worker(self, worker_id: str) -> Optional[WorkerInfo]:
         """Unregister a worker and prune its assets from the inverted index.
@@ -268,33 +294,73 @@ class WorkerRegistry:
                     continue
             return result
 
+    def _add_worker_hashes_locked(self, worker_id: str, hashes: Iterable[str]) -> int:
+        """Core of add_worker_hashes(). Assumes self._lock is already held
+        by the caller -- never persists itself, so it's safe to call from
+        another locked method (e.g. record_heartbeat) without triggering a
+        disk write while the lock is still held (RLock is reentrant, so a
+        nested `with self._lock:` here would NOT actually release the
+        outer lock, which is exactly why persistence must not live here)."""
+        if worker_id not in self._workers:
+            return 0
+
+        added_count = 0
+        worker = self._workers[worker_id]
+        worker_hashes = self._worker_hashes.setdefault(worker_id, set())
+
+        for raw_h in hashes:
+            try:
+                norm_h = validate_sha256_hex(raw_h)
+                if norm_h not in worker_hashes:
+                    worker_hashes.add(norm_h)
+                    if norm_h not in self._hash_index:
+                        self._hash_index[norm_h] = set()
+                    self._hash_index[norm_h].add(worker_id)
+                    added_count += 1
+            except ValueError as exc:
+                logger.warning("Invalid hash skipped for worker %s: %s", worker_id, exc)
+
+        worker.inventory_hashes = set(worker_hashes)
+        return added_count
+
     def add_worker_hashes(self, worker_id: str, hashes: Iterable[str]) -> int:
         """Add new hashes to a worker's inventory in the registry.
 
         Returns count of newly indexed hashes.
         """
         with self._lock:
-            if worker_id not in self._workers:
-                return 0
+            added_count = self._add_worker_hashes_locked(worker_id, hashes)
+            snapshot = self._workers[worker_id].model_copy(deep=True) if worker_id in self._workers else None
+        self._persist_worker(snapshot)
+        return added_count
 
-            added_count = 0
-            worker = self._workers[worker_id]
-            worker_hashes = self._worker_hashes.setdefault(worker_id, set())
+    def _remove_worker_hashes_locked(self, worker_id: str, hashes: Iterable[str]) -> int:
+        """Core of remove_worker_hashes(). Assumes self._lock is already
+        held by the caller -- never persists itself; see
+        _add_worker_hashes_locked's docstring for why."""
+        if worker_id not in self._workers:
+            return 0
 
-            for raw_h in hashes:
-                try:
-                    norm_h = validate_sha256_hex(raw_h)
-                    if norm_h not in worker_hashes:
-                        worker_hashes.add(norm_h)
-                        if norm_h not in self._hash_index:
-                            self._hash_index[norm_h] = set()
-                        self._hash_index[norm_h].add(worker_id)
-                        added_count += 1
-                except ValueError as exc:
-                    logger.warning("Invalid hash skipped for worker %s: %s", worker_id, exc)
+        removed_count = 0
+        worker = self._workers[worker_id]
+        worker_hashes = self._worker_hashes.get(worker_id, set())
 
-            worker.inventory_hashes = set(worker_hashes)
-            return added_count
+        for raw_h in hashes:
+            try:
+                norm_h = validate_sha256_hex(raw_h)
+                if norm_h in worker_hashes:
+                    worker_hashes.discard(norm_h)
+                    worker_set = self._hash_index.get(norm_h)
+                    if worker_set:
+                        worker_set.discard(worker_id)
+                        if not worker_set:
+                            del self._hash_index[norm_h]
+                    removed_count += 1
+            except ValueError:
+                continue
+
+        worker.inventory_hashes = set(worker_hashes)
+        return removed_count
 
     def remove_worker_hashes(self, worker_id: str, hashes: Iterable[str]) -> int:
         """Remove hashes from a worker's inventory in the registry.
@@ -302,29 +368,10 @@ class WorkerRegistry:
         Returns count of removed hashes.
         """
         with self._lock:
-            if worker_id not in self._workers:
-                return 0
-
-            removed_count = 0
-            worker = self._workers[worker_id]
-            worker_hashes = self._worker_hashes.get(worker_id, set())
-
-            for raw_h in hashes:
-                try:
-                    norm_h = validate_sha256_hex(raw_h)
-                    if norm_h in worker_hashes:
-                        worker_hashes.discard(norm_h)
-                        worker_set = self._hash_index.get(norm_h)
-                        if worker_set:
-                            worker_set.discard(worker_id)
-                            if not worker_set:
-                                del self._hash_index[norm_h]
-                        removed_count += 1
-                except ValueError:
-                    continue
-
-            worker.inventory_hashes = set(worker_hashes)
-            return removed_count
+            removed_count = self._remove_worker_hashes_locked(worker_id, hashes)
+            snapshot = self._workers[worker_id].model_copy(deep=True) if worker_id in self._workers else None
+        self._persist_worker(snapshot)
+        return removed_count
 
     def sync_worker_inventory(self, worker_id: str, inventory: Set[str]) -> Tuple[int, int]:
         """Atomically synchronize a worker's inventory with a new target set.
@@ -346,9 +393,11 @@ class WorkerRegistry:
             to_add = normalized_target - current_hashes
             to_remove = current_hashes - normalized_target
 
-            added = self.add_worker_hashes(worker_id, to_add)
-            removed = self.remove_worker_hashes(worker_id, to_remove)
-            return (added, removed)
+            added = self._add_worker_hashes_locked(worker_id, to_add)
+            removed = self._remove_worker_hashes_locked(worker_id, to_remove)
+            snapshot = self._workers[worker_id].model_copy(deep=True)
+        self._persist_worker(snapshot)
+        return (added, removed)
 
     def get_all_indexed_hashes(self) -> Set[str]:
         """Return defensive set of all unique hashes indexed across the cluster."""
@@ -387,17 +436,24 @@ class WorkerRegistry:
                     worker.used_bytes = payload.used_bytes
                 worker.active_transfers = payload.active_transfers
 
-                # Process inventory deltas if present
+                # Process inventory deltas if present. Uses the *_locked
+                # helpers, not the public add/remove_worker_hashes, so this
+                # method persists exactly once below rather than mid-lock
+                # (RLock reentrancy means calling the public, self-persisting
+                # methods here would NOT actually release this outer lock
+                # before their disk write).
                 if payload.inventory_delta_added:
-                    self.add_worker_hashes(worker_id, payload.inventory_delta_added)
+                    self._add_worker_hashes_locked(worker_id, payload.inventory_delta_added)
                 if payload.inventory_delta_removed:
-                    self.remove_worker_hashes(worker_id, payload.inventory_delta_removed)
+                    self._remove_worker_hashes_locked(worker_id, payload.inventory_delta_removed)
 
             health = self._health_records.get(worker_id)
             if health and health.health_status == WorkerHealthStatus.DEAD:
                 health.health_status = WorkerHealthStatus.HEALTHY
 
-            return True
+            snapshot = worker.model_copy(deep=True)
+        self._persist_worker(snapshot)
+        return True
 
     def evict_expired_workers(
         self,
