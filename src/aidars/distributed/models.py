@@ -623,6 +623,10 @@ class WorkerResourceProfile(BaseModel):
     status: WorkerStatus = Field(default=WorkerStatus.ACTIVE)
     local_cached_hashes: Set[str] = Field(default_factory=set)
     timestamp_utc: float = Field(default_factory=time.time)
+    can_execute_workloads: bool = Field(
+        default=True,
+        description="Whether this node accepts compute workload placement, or exists purely as a CAS/asset source.",
+    )
 
 
 class PlacementDecision(BaseModel):

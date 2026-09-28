@@ -199,9 +199,118 @@ async def test_6_10_execution_timeout(tmp_path):
 def test_6_13_task_idempotency():
     reg = WorkloadRegistry()
     spec = WorkloadSpec(workload_id="task-dup", task_type="test")
-    
+
     r1 = reg.add_workload(spec)
     r2 = reg.add_workload(spec)
-    
+
     assert r1 is r2
     assert len(reg.list_workloads()) == 1
+
+# Phase 4B.0: Explicit compute eligibility (can_execute_workloads)
+def test_can_execute_workloads_default_profile_remains_eligible():
+    """A profile that doesn't set can_execute_workloads (default True) is
+    still selected when it's the only candidate meeting resource requirements."""
+    engine = PlacementEngine()
+    spec = WorkloadSpec(
+        workload_id="task-default-eligible",
+        task_type="test",
+        min_ram_bytes=1024,
+    )
+    profile = WorkerResourceProfile(
+        worker_id="w-default",
+        endpoint_url="http://127.0.0.1:8001",
+        ip_address="127.0.0.1",
+        cpu_cores_total=4,
+        cpu_utilization_percent=10.0,
+        ram_total_bytes=4096,
+        ram_available_bytes=4096,
+    )
+    assert profile.can_execute_workloads is True
+
+    decision = engine.evaluate(spec, [profile])
+    assert decision is not None
+    assert decision.selected_worker_id == "w-default"
+
+
+def test_can_execute_workloads_false_is_never_selected_despite_ample_resources():
+    """A node explicitly marked can_execute_workloads=False must never be
+    selected, even when it fully satisfies every RAM/GPU/resource check,
+    and even when it would otherwise clearly outscore a real worker."""
+    engine = PlacementEngine()
+    spec = WorkloadSpec(
+        workload_id="task-exclude-cas-only",
+        task_type="test",
+        min_ram_bytes=1024,
+        requires_gpu=False,
+    )
+
+    cas_only_profile = WorkerResourceProfile(
+        worker_id="w-cas-only",
+        endpoint_url="http://127.0.0.1:8001",
+        ip_address="127.0.0.1",
+        cpu_cores_total=64,
+        cpu_utilization_percent=0.0,
+        ram_total_bytes=1024 * 1024 * 1024 * 1024,
+        ram_available_bytes=1024 * 1024 * 1024 * 1024,  # abundant RAM
+        gpu_available=True,
+        vram_available_bytes=1024 * 1024 * 1024,
+        can_execute_workloads=False,
+    )
+
+    # Alone: must be rejected outright, not just "no eligible worker" by accident.
+    decision = engine.evaluate(spec, [cas_only_profile])
+    assert decision is None, "CAS-only node must never be selected regardless of resources"
+
+    # Alongside a modest real worker: the real worker must win even though
+    # the CAS-only node looks far better on every resource axis.
+    real_worker = WorkerResourceProfile(
+        worker_id="w-real",
+        endpoint_url="http://127.0.0.1:8002",
+        ip_address="127.0.0.1",
+        cpu_cores_total=4,
+        cpu_utilization_percent=10.0,
+        ram_total_bytes=4096,
+        ram_available_bytes=4096,
+    )
+    decision = engine.evaluate(spec, [cas_only_profile, real_worker])
+    assert decision is not None
+    assert decision.selected_worker_id == "w-real"
+
+
+def test_can_execute_workloads_does_not_change_existing_scoring_behavior():
+    """Adding can_execute_workloads must not alter scoring/selection among
+    profiles that all use the default value (regression check against
+    pre-existing multi-attribute placement behavior)."""
+    engine = PlacementEngine()
+    spec = WorkloadSpec(
+        workload_id="task-scoring-unchanged",
+        task_type="test",
+        min_cpu_cores=2,
+        min_ram_bytes=1024,
+    )
+    profiles = [
+        WorkerResourceProfile(
+            worker_id="w-low",
+            endpoint_url="http://127.0.0.1:8001",
+            ip_address="127.0.0.1",
+            cpu_cores_total=4,
+            cpu_utilization_percent=80.0,
+            ram_total_bytes=4096,
+            ram_available_bytes=2048,
+        ),
+        WorkerResourceProfile(
+            worker_id="w-high",
+            endpoint_url="http://127.0.0.1:8002",
+            ip_address="127.0.0.1",
+            cpu_cores_total=8,
+            cpu_utilization_percent=10.0,
+            ram_total_bytes=8192,
+            ram_available_bytes=8192,
+        ),
+    ]
+    for p in profiles:
+        assert p.can_execute_workloads is True
+
+    decision = engine.evaluate(spec, profiles)
+    assert decision is not None
+    assert decision.selected_worker_id == "w-high"

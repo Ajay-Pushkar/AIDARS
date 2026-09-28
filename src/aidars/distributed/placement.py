@@ -51,6 +51,8 @@ class PlacementEngine:
             # Hard Constraint Filters
             if profile.status in (WorkerStatus.DRAINING, WorkerStatus.UNHEALTHY):
                 continue
+            if not profile.can_execute_workloads:
+                continue
             if profile.ram_available_bytes < spec.min_ram_bytes:
                 continue
             if spec.requires_gpu and not profile.gpu_available:
