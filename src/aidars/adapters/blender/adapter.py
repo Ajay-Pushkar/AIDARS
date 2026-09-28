@@ -1,11 +1,20 @@
 import hashlib
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Optional
 from aidars.adapters.base import ApplicationAdapter
 from aidars.distributed.models import WorkloadSpec
 from aidars.adapters.blender.intelligence.scene_engine import SceneEngine
+from aidars.core.assets.manager import AssetManager
 
 class BlenderAdapter(ApplicationAdapter):
     """Blender adapter implementing the generic contract."""
+
+    def __init__(self, asset_manager: Optional[AssetManager] = None) -> None:
+        # Optional: bound to the Master's CAS via the existing AssetManager
+        # abstraction (never a raw LocalCASAdapter -- see core/assets/manager.py).
+        # When absent, evaluate_request() still computes real M4 hashes for
+        # WorkloadSpec.input_asset_hashes; it just has no legitimate CAS to
+        # ingest into, so it doesn't fabricate one.
+        self.asset_manager = asset_manager
 
     def evaluate_request(self, request: dict) -> List[WorkloadSpec]:
         """Parse Blender request, discover dependencies, and output WorkloadSpecs.
@@ -31,9 +40,24 @@ class BlenderAdapter(ApplicationAdapter):
         # M4: resolve real physical assets and their SHA-256 hashes. Only
         # successfully resolved assets contribute a hash; embedded/missing
         # assets are never fabricated (AssetRecord.sha256 stays None for
-        # them). CAS ingestion of these bytes is a separate, later step.
+        # them).
         asset_records = engine.resolve_required_assets(snapshot, graph, input_path)
-        input_asset_hashes = {record.sha256 for record in asset_records if record.sha256}
+        resolved_paths_by_hash = {
+            record.sha256: record.source_path
+            for record in asset_records
+            if record.sha256 and record.source_path
+        }
+        input_asset_hashes = set(resolved_paths_by_hash.keys())
+
+        # If a Master-side AssetManager was supplied, physically ingest every
+        # resolved asset into CAS now, so the hashes above are guaranteed to
+        # be fetchable by a worker (Phase 4B.1-4B.3) rather than merely
+        # computed. When no AssetManager is available, this adapter has no
+        # legitimate CAS to ingest into, so it deliberately does nothing
+        # rather than fabricating one.
+        if self.asset_manager is not None:
+            for sha256, source_path in resolved_paths_by_hash.items():
+                self.asset_manager.upload_asset_file(source_path, sha256)
 
         min_vram_bytes = 4 * 1024 * 1024 * 1024 if requires_gpu else 0
 
