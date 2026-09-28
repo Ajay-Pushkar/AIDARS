@@ -198,6 +198,10 @@ class WorkerRegistrationPayload(BaseModel):
     capabilities: WorkerCapabilities = Field(default_factory=WorkerCapabilities)
     inventory_hashes: Set[str] = Field(default_factory=set)
     tags: Dict[str, str] = Field(default_factory=dict)
+    can_execute_workloads: bool = Field(
+        default=True,
+        description="Whether this node accepts compute workload placement, or exists purely as a CAS/asset source.",
+    )
 
     @field_validator("endpoint_url")
     @classmethod
@@ -257,6 +261,10 @@ class WorkerInfo(BaseModel):
     registered_at_utc: float = Field(default_factory=time.time)
     last_metrics: Optional[WorkerMetrics] = None
     tags: Dict[str, str] = Field(default_factory=dict)
+    can_execute_workloads: bool = Field(
+        default=True,
+        description="Whether this node accepts compute workload placement, or exists purely as a CAS/asset source.",
+    )
 
     @field_validator("endpoint_url")
     @classmethod

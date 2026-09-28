@@ -58,6 +58,7 @@ class DistributedWorker:
         capacity_bytes: int = 100 * 1024 * 1024 * 1024,
         heartbeat_interval_seconds: float = 5.0,
         http_client: Optional[httpx.AsyncClient] = None,
+        can_execute_workloads: bool = True,
     ) -> None:
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
         self.ip_address = ip_address
@@ -66,6 +67,11 @@ class DistributedWorker:
         self.coordinator_url = coordinator_url.rstrip("/") if coordinator_url else None
         self.capacity_bytes = capacity_bytes
         self.heartbeat_interval_seconds = max(0.5, float(heartbeat_interval_seconds))
+        # False for a pure CAS/asset-source node (e.g. a Master ingestion
+        # point): it registers, serves, and receives assets like any other
+        # node, but PlacementEngine must never select it for compute.
+        self.can_execute_workloads = can_execute_workloads
+        self._last_reported_inventory: Set[str] = set()
 
         # 1. CAS Adapter Initialization
         if cas_adapter is not None:
@@ -143,6 +149,7 @@ class DistributedWorker:
             inventory_hashes=self.inventory_hashes,
             last_heartbeat_utc=time.time(),
             last_metrics=self.node_metrics,
+            can_execute_workloads=self.can_execute_workloads,
         )
 
     # ========================================================================
@@ -201,6 +208,7 @@ class DistributedWorker:
         if not coord_url:
             raise ValueError("Coordinator URL required for registration")
 
+        current_inventory = self.inventory_hashes
         payload = WorkerRegistrationPayload(
             worker_id=self.worker_id,
             endpoint_url=self.endpoint_url,
@@ -209,10 +217,14 @@ class DistributedWorker:
             capacity_bytes=self.capacity_bytes,
             used_bytes=self.node_metrics.used_bytes,
             capabilities=self.capabilities,
-            inventory_hashes=self.inventory_hashes,
+            inventory_hashes=current_inventory,
+            can_execute_workloads=self.can_execute_workloads,
         )
         resp = await self.client.register_worker(payload, coordinator_url=coord_url)
         self._last_heartbeat_ack_utc = time.time()
+        # Registration already reported the full inventory, so the next
+        # heartbeat should only report hashes added/removed since now.
+        self._last_reported_inventory = set(current_inventory)
         logger.info("Worker %s registered with coordinator %s", self.worker_id, resp.coordinator_id)
         return resp
 
@@ -227,6 +239,14 @@ class DistributedWorker:
         self.node_metrics.used_bytes = used
         self.node_metrics.available_bytes = max(0, self.capacity_bytes - used)
 
+        # Report inventory changes since the last successful heartbeat/
+        # registration, so newly-ingested assets (e.g. a Master ingesting
+        # M4-resolved files between heartbeats) become visible to
+        # WorkerRegistry/locate_assets_sync without requiring re-registration.
+        current_inventory = self.inventory_hashes
+        added = current_inventory - self._last_reported_inventory
+        removed = self._last_reported_inventory - current_inventory
+
         payload = HeartbeatPayload(
             worker_id=self.worker_id,
             timestamp_utc=time.time(),
@@ -234,12 +254,16 @@ class DistributedWorker:
             active_transfers=self.node_metrics.active_transfers,
             used_bytes=used,
             available_bytes=self.node_metrics.available_bytes,
+            inventory_delta_added=added,
+            inventory_delta_removed=removed,
         )
         resp = await self.client.send_heartbeat(self.worker_id, payload, coordinator_url=coord_url)
         self._last_heartbeat_ack_utc = time.time()
         if resp.re_register_required:
             logger.warning("Coordinator requested re-registration for worker %s", self.worker_id)
             await self.register(coord_url)
+        else:
+            self._last_reported_inventory = current_inventory
         return resp
 
     async def _heartbeat_loop(self) -> None:

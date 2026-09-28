@@ -72,6 +72,7 @@ class WorkloadOrchestrator:
                     status=info.status,
                     local_cached_hashes=info.inventory_hashes,
                     timestamp_utc=time.time(),
+                    can_execute_workloads=info.can_execute_workloads,
                 ))
         
         decision = self.placement_engine.evaluate(spec, profiles)

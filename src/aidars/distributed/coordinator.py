@@ -222,6 +222,7 @@ class CoordinatorService:
             last_heartbeat_utc=time.time(),
             registered_at_utc=time.time(),
             tags=payload.tags,
+            can_execute_workloads=payload.can_execute_workloads,
         )
         registered = self.registry.register_worker(worker_info)
         return WorkerRegistrationResponse(
