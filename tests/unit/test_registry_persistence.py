@@ -180,12 +180,10 @@ def test_sync_worker_inventory_persists(tmp_path: Path):
 # ============================================================================
 
 
-def test_unregister_worker_does_not_touch_store_pending_delete_api(tmp_path: Path):
-    """CoordinatorStateStore has no delete_worker()/delete API (Phase 5.2A
-    scope). unregister_worker()/evict_expired_workers() are therefore NOT
-    wired to persistence in this phase -- a stale row correctly remains
-    in the workers table after in-memory eviction. This test documents
-    that as the current, deliberate behavior, not an oversight."""
+def test_unregister_worker_removes_persisted_row(tmp_path: Path):
+    """Phase 5.2C: CoordinatorStateStore.delete_worker() closed the gap
+    documented in Phase 5.2B -- unregister_worker() now removes the
+    persisted row, not just the in-memory entry."""
     store = CoordinatorStateStore(tmp_path / "state.db")
     registry = WorkerRegistry(state_store=store)
     registry.register_worker(_make_worker_info())
@@ -194,8 +192,7 @@ def test_unregister_worker_does_not_touch_store_pending_delete_api(tmp_path: Pat
     registry.unregister_worker("w-1")
 
     assert registry.has_worker("w-1") is False  # gone in-memory
-    assert len(store.load_workers()) == 1  # still present in the store -- documented gap
-    assert not hasattr(store, "delete_worker")
+    assert len(store.load_workers()) == 0  # gone from the store too
 
 
 # ============================================================================

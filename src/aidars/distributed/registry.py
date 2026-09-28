@@ -121,6 +121,18 @@ class WorkerRegistry:
             return
         self._state_store.save_worker(snapshot)
 
+    def _delete_persisted_worker(self, worker_id: Optional[str]) -> None:
+        """Remove a worker's persisted row, if a store is configured.
+
+        Same lock-released-before-I/O and fail-loud rules as
+        _persist_worker. `worker_id` is None when the caller found
+        nothing to remove (e.g. unregistering an unknown worker_id),
+        in which case this is a no-op.
+        """
+        if self._state_store is None or worker_id is None:
+            return
+        self._state_store.delete_worker(worker_id)
+
     # ========================================================================
     # Worker Registration & Lifecycle
     # ========================================================================
@@ -180,23 +192,34 @@ class WorkerRegistry:
         self._persist_worker(snapshot)
         return snapshot
 
+    def _unregister_worker_locked(self, worker_id: str) -> Optional[WorkerInfo]:
+        """Core of unregister_worker(). Assumes self._lock is already held
+        by the caller -- never persists itself, so it's safe to call from
+        another locked method (e.g. evict_expired_workers) without
+        triggering a disk write while that outer lock is still held (see
+        _add_worker_hashes_locked's docstring for why this matters with
+        a reentrant RLock)."""
+        worker = self._workers.pop(worker_id, None)
+        if not worker:
+            return None
+
+        self._remove_worker_from_index(worker_id)
+
+        if worker_id in self._health_records:
+            self._health_records[worker_id].health_status = WorkerHealthStatus.DEAD
+
+        logger.info("Worker unregistered: %s", worker_id)
+        return worker.model_copy(deep=True)
+
     def unregister_worker(self, worker_id: str) -> Optional[WorkerInfo]:
         """Unregister a worker and prune its assets from the inverted index.
 
         Runs in O(K) time where K is the number of assets held by this worker.
         """
         with self._lock:
-            worker = self._workers.pop(worker_id, None)
-            if not worker:
-                return None
-
-            self._remove_worker_from_index(worker_id)
-
-            if worker_id in self._health_records:
-                self._health_records[worker_id].health_status = WorkerHealthStatus.DEAD
-
-            logger.info("Worker unregistered: %s", worker_id)
-            return worker.model_copy(deep=True)
+            result = self._unregister_worker_locked(worker_id)
+        self._delete_persisted_worker(worker_id if result is not None else None)
+        return result
 
     def _remove_worker_from_index(self, worker_id: str) -> None:
         """Internal helper to prune worker from inverted hash index. Assumes lock held."""
@@ -451,6 +474,17 @@ class WorkerRegistry:
             if health and health.health_status == WorkerHealthStatus.DEAD:
                 health.health_status = WorkerHealthStatus.HEALTHY
 
+            # Phase 5.2C: a worker restored from persisted coordinator
+            # state is registered with status=OFFLINE (see
+            # CoordinatorService._restore_persisted_state) so it isn't
+            # trusted as a live compute/asset candidate merely because it
+            # exists in SQLite. A fresh heartbeat is proof of life, so
+            # it's the smallest existing signal that can promote it back
+            # to ACTIVE -- no new worker state is introduced.
+            if worker.status == WorkerStatus.OFFLINE:
+                worker.status = WorkerStatus.ACTIVE
+                logger.info("Worker %s verified live via heartbeat after restore; marked ACTIVE.", worker_id)
+
             snapshot = worker.model_copy(deep=True)
         self._persist_worker(snapshot)
         return True
@@ -479,10 +513,19 @@ class WorkerRegistry:
             evicted: List[str] = []
             for wid in expired_ids:
                 logger.warning("Evicting expired worker %s (last heartbeat: %.1fs ago)", wid, now - self._workers[wid].last_heartbeat_utc)
-                self.unregister_worker(wid)
-                evicted.append(wid)
+                if self._unregister_worker_locked(wid) is not None:
+                    evicted.append(wid)
 
-            return evicted
+        # Persisted deletes happen after the lock is released (disk I/O,
+        # same rule as _persist_worker); calling the public
+        # unregister_worker() here instead would be safe too since RLock
+        # is reentrant, but would delete one row at a time interleaved
+        # with the loop above instead of after it, and would silently
+        # depend on reentrancy to avoid deadlock -- clearer to batch it.
+        for wid in evicted:
+            self._delete_persisted_worker(wid)
+
+        return evicted
 
     # ========================================================================
     # Health & Penalty Scoring

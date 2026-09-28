@@ -38,6 +38,18 @@ class WorkloadState(str, Enum):
     UNSCHEDULABLE = "unschedulable"
 
 
+# Phase 5.2C: states a recovered workload must NOT be re-driven from,
+# per the coordinator-recovery spec. Deliberately narrower than the
+# `update_state()` completed_at-setting tuple below (which also includes
+# TIMEOUT for an unrelated reason): TIMEOUT is not assigned anywhere in
+# live code today, so it is left out here rather than assumed reachable.
+TERMINAL_WORKLOAD_STATES = frozenset({
+    WorkloadState.COMPLETED,
+    WorkloadState.FAILED,
+    WorkloadState.UNSCHEDULABLE,
+})
+
+
 class WorkloadRecord:
     """A record of a workload's lifecycle and current state."""
 
@@ -139,3 +151,17 @@ class WorkloadRegistry:
     def list_workloads(self) -> List[WorkloadRecord]:
         with self._lock:
             return list(self._workloads.values())
+
+    def restore_workload(self, record: WorkloadRecord) -> None:
+        """Insert a fully-formed WorkloadRecord directly into the registry,
+        bypassing add_workload()'s default-initialization (which always
+        creates a fresh SUBMITTED record and would discard the restored
+        state/placement/execution_result).
+
+        Phase 5.2C only: used by CoordinatorService startup recovery to
+        load records reconstructed from CoordinatorStateStore.load_workloads().
+        Does not persist -- the record's source IS the persisted store, so
+        writing it straight back would be a redundant no-op at best.
+        """
+        with self._lock:
+            self._workloads[record.spec.workload_id] = record

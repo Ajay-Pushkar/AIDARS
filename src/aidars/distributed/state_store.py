@@ -125,6 +125,14 @@ class CoordinatorStateStore:
             ))
             self._conn.commit()
 
+    def delete_worker(self, worker_id: str) -> None:
+        """Remove a worker's persisted row, if any (e.g. on unregister/eviction)."""
+        with self._lock:
+            if self._conn is None:
+                return
+            self._conn.execute("DELETE FROM workers WHERE worker_id = ?", (worker_id,))
+            self._conn.commit()
+
     def load_workers(self) -> List[WorkerInfo]:
         """Load every persisted worker as a fully-reconstructed WorkerInfo."""
         with self._lock:

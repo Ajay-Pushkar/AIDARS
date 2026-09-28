@@ -35,7 +35,12 @@ from aidars.m7.telemetry import TelemetryMemory, TelemetryIngestor
 from aidars.m7.controller import M7OrchestratorBridge
 from aidars.distributed.prioritizer import CandidatePrioritizer, LatencyTracker
 from aidars.distributed.registry import ClusterStats, WorkerRegistry
-from aidars.distributed.workload_registry import WorkloadRegistry, WorkloadRecord
+from aidars.distributed.state_store import CoordinatorStateStore
+from aidars.distributed.workload_registry import (
+    TERMINAL_WORKLOAD_STATES,
+    WorkloadRecord,
+    WorkloadRegistry,
+)
 from aidars.distributed.workload import WorkloadOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -54,6 +59,7 @@ class CoordinatorService:
         registry: Optional[WorkerRegistry] = None,
         prioritizer: Optional[CandidatePrioritizer] = None,
         latency_tracker: Optional[LatencyTracker] = None,
+        state_store: Optional[CoordinatorStateStore] = None,
     ) -> None:
         self.coordinator_id = coordinator_id or f"coord-{uuid.uuid4().hex[:8]}"
         self.heartbeat_interval_seconds = float(heartbeat_interval_seconds)
@@ -61,12 +67,19 @@ class CoordinatorService:
         self.eviction_interval_seconds = float(eviction_interval_seconds)
         self.penalty_decay_interval_seconds = float(penalty_decay_interval_seconds)
 
+        # Optional coordinator-state persistence/recovery (Phase 5.2C).
+        # None (the default) preserves pure in-memory behavior exactly as
+        # before -- no SQLite dependency, no recovery, unless a store is
+        # explicitly injected by the caller.
+        self.state_store = state_store
+
         self.latency_tracker = latency_tracker or LatencyTracker()
         self.prioritizer = prioritizer or CandidatePrioritizer(latency_tracker=self.latency_tracker)
         self.registry = registry or WorkerRegistry(
-            heartbeat_timeout_seconds=self.heartbeat_timeout_seconds
+            heartbeat_timeout_seconds=self.heartbeat_timeout_seconds,
+            state_store=state_store,
         )
-        self.workload_registry = WorkloadRegistry()
+        self.workload_registry = WorkloadRegistry(state_store=state_store)
         
         # M7 Intelligence Initialization
         self.m7_memory = TelemetryMemory()
@@ -91,12 +104,21 @@ class CoordinatorService:
     # ========================================================================
 
     async def start(self) -> None:
-        """Start the background eviction and decay task."""
+        """Start the background eviction and decay task.
+
+        If a state_store was injected, this also performs Phase 5.2C
+        startup recovery in the order: restore workers -> restore
+        workloads -> start normal background loops -> re-drive recovered
+        non-terminal workloads. Recovery is a no-op when state_store is
+        None, so default construction is unaffected.
+        """
         if self._running:
             return
         self._running = True
+        pending_redrive = self._restore_persisted_state()
         self._eviction_task = asyncio.create_task(self._run_eviction_loop())
         self._health_task = asyncio.create_task(self._evaluate_cluster_health_loop())
+        self._redrive_recovered_workloads(pending_redrive)
         logger.info("CoordinatorService %s started.", self.coordinator_id)
 
     async def stop(self) -> None:
@@ -121,6 +143,94 @@ class CoordinatorService:
             self._health_task = None
 
         logger.info("CoordinatorService %s stopped.", self.coordinator_id)
+
+    def _restore_persisted_state(self) -> List[str]:
+        """Phase 5.2C: load persisted workers/workloads from the optional
+        state store into the live registries. No-op if state_store is None.
+
+        Worker recovery: restored workers are NOT trusted as live compute
+        candidates merely because a row exists in SQLite. Each restored
+        WorkerInfo has its status forced to OFFLINE before being inserted
+        via the normal WorkerRegistry.register_worker() path -- the same
+        status value the registry already excludes from
+        list_workers(active_only=True) and from locate_assets_sync's
+        candidate scan. A worker only becomes usable again once it proves
+        liveness with a fresh heartbeat (WorkerRegistry.record_heartbeat
+        promotes OFFLINE -> ACTIVE) or a fresh /workers/register call
+        (which always sets status=ACTIVE). No new worker state is
+        introduced.
+
+        Workload recovery: every persisted WorkloadRecord is restored
+        as-is via WorkloadRegistry.restore_workload() so historical state,
+        placement, and execution_result data survive a restart untouched.
+        Records whose persisted state is COMPLETED, FAILED, or
+        UNSCHEDULABLE (TERMINAL_WORKLOAD_STATES) are left alone. Any other
+        persisted state (SUBMITTED, VALIDATING, PLACING, PLACED,
+        MIGRATING -- the only states live code actually assigns) had an
+        UNKNOWN execution outcome when the coordinator went down, so its
+        workload_id is returned for re-drive by _redrive_recovered_workloads.
+
+        Returns the list of workload_ids that need re-driving. Re-driving
+        itself is deferred to a separate call so the caller can start the
+        normal background loops first, per the phase's specified startup
+        order.
+        """
+        if self.state_store is None:
+            return []
+
+        restored_workers = self.state_store.load_workers()
+        for info in restored_workers:
+            info.status = WorkerStatus.OFFLINE
+            # The persisted last_heartbeat_utc is from before the crash and
+            # is almost certainly already older than heartbeat_timeout_seconds
+            # by the time the coordinator restarts. Without resetting it, the
+            # very next eviction loop pass would immediately purge (and, per
+            # Phase 5.2C's delete wiring, un-persist) every restored worker
+            # before it gets any chance to send a real heartbeat -- defeating
+            # the point of restoring it as OFFLINE/unverified rather than
+            # just dropping it. Resetting it to now grants the same
+            # heartbeat_timeout_seconds grace window a brand-new worker gets;
+            # it does not mark the worker ACTIVE or trusted, only un-expired.
+            info.last_heartbeat_utc = time.time()
+            self.registry.register_worker(info)
+        if restored_workers:
+            logger.info(
+                "Coordinator %s restored %d worker(s) from persisted state (unverified until next heartbeat/registration).",
+                self.coordinator_id, len(restored_workers),
+            )
+
+        restored_workloads = self.state_store.load_workloads()
+        pending_redrive: List[str] = []
+        for record in restored_workloads:
+            self.workload_registry.restore_workload(record)
+            if record.state not in TERMINAL_WORKLOAD_STATES:
+                pending_redrive.append(record.spec.workload_id)
+        if restored_workloads:
+            logger.info(
+                "Coordinator %s restored %d workload(s) from persisted state (%d non-terminal, pending re-drive).",
+                self.coordinator_id, len(restored_workloads), len(pending_redrive),
+            )
+
+        return pending_redrive
+
+    def _redrive_recovered_workloads(self, workload_ids: List[str]) -> None:
+        """Re-dispatch recovered non-terminal workloads through the
+        existing WorkloadOrchestrator._process_workload() path -- the same
+        dispatcher used for freshly-submitted workloads, not a second,
+        recovery-specific dispatch mechanism.
+
+        AT-LEAST-ONCE, NOT EXACTLY-ONCE: a workload that was actually
+        EXECUTING on a worker when the coordinator crashed may have
+        already completed there; the coordinator has no way to know that
+        and will dispatch it again here, which can duplicate compute.
+        CAS content-addressing makes duplicate *output storage* safe
+        (identical hash -> identical bytes, second write is a no-op), but
+        it does not prevent the duplicate *compute* itself. Exactly-once
+        execution, worker-side execution IDs, and cross-worker
+        reconciliation are explicitly out of scope for this phase.
+        """
+        for workload_id in workload_ids:
+            asyncio.create_task(self.orchestrator._process_workload(workload_id))
 
     async def _run_eviction_loop(self) -> None:
         """Periodic loop that purges expired dead workers and decays penalties."""
