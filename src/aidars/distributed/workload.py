@@ -112,8 +112,10 @@ class WorkloadOrchestrator:
                     asyncio.create_task(self._process_workload(workload_id))
                     return
                 elif result.success:
+                    self.workload_registry.set_result(workload_id, result)
                     self.workload_registry.update_state(workload_id, WorkloadState.COMPLETED)
                 else:
+                    self.workload_registry.set_result(workload_id, result)
                     self.workload_registry.update_state(workload_id, WorkloadState.FAILED, error_message=result.error_message)
                 
                 if self.m7_ingestor:
@@ -141,8 +143,9 @@ class WorkloadOrchestrator:
                                 resp = await client.post(f"{fallback_worker.endpoint_url}/api/v1/workloads/execute", json=spec.model_dump(mode='json'), timeout=60.0)
                                 resp.raise_for_status()
                                 result = WorkloadExecutionResult(**resp.json())
+                                self.workload_registry.set_result(workload_id, result)
                                 self.workload_registry.update_state(
-                                    workload_id, 
+                                    workload_id,
                                     WorkloadState.COMPLETED if result.success else WorkloadState.FAILED,
                                     error_message=None if result.success else result.error_message
                                 )
