@@ -162,11 +162,27 @@ def _make_workload_record(workload_id: str, state: WorkloadState) -> WorkloadRec
 
 
 @pytest.mark.asyncio
-async def test_redrive_after_restart_creates_a_new_attempt_not_a_new_workload():
+async def test_redrive_after_restart_creates_a_new_attempt_not_a_new_workload(tmp_path: Path):
     """End-to-end: a coordinator restart redrives a non-terminal
     workload through the existing _process_workload() dispatcher, and
     the result is a NEW, correctly-numbered attempt for the SAME
-    workload_id -- never a second logical workload."""
+    workload_id -- never a second logical workload.
+
+    Uses pytest's tmp_path fixture rather than a manual
+    tempfile.TemporaryDirectory(), matching the convention every other
+    test in this suite already uses: `service`'s CoordinatorStateStore
+    is intentionally left open for the rest of the test (a coordinator
+    keeps its state store open for its whole process lifetime; nothing
+    here calls service.stop()/close()), and a bare
+    tempfile.TemporaryDirectory() tries to remove its directory
+    synchronously while that connection is still live -- on Windows,
+    SQLite's VFS opens the file without FILE_SHARE_DELETE, so directory
+    removal fails with WinError 32 as long as the connection is open
+    (harmless on POSIX, which allows unlinking open files). tmp_path
+    defers cleanup past the end of the test function, avoiding the race
+    entirely -- this is a test resource-management fix, not a change to
+    what the test verifies.
+    """
     call_count = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -178,39 +194,39 @@ async def test_redrive_after_restart_creates_a_new_attempt_not_a_new_workload():
         )
         return httpx.Response(200, json=result.model_dump(mode="json"))
 
-    import tempfile
-    with tempfile.TemporaryDirectory() as td:
-        db_path = Path(td) / "state.db"
-        store = CoordinatorStateStore(db_path)
-        store.save_workload(_make_workload_record("task-1", WorkloadState.PLACED))
-        attempt_registry = AttemptRegistry(state_store=store)
-        stale = attempt_registry.create_attempt("task-1")
-        attempt_registry.mark_assigned(stale.attempt_id, "w-1")
-        attempt_registry.mark_running(stale.attempt_id)
-        store.save_worker(_make_worker_info("w-1"))
-        store.close()
+    db_path = tmp_path / "state.db"
+    store = CoordinatorStateStore(db_path)
+    store.save_workload(_make_workload_record("task-1", WorkloadState.PLACED))
+    attempt_registry = AttemptRegistry(state_store=store)
+    stale = attempt_registry.create_attempt("task-1")
+    attempt_registry.mark_assigned(stale.attempt_id, "w-1")
+    attempt_registry.mark_running(stale.attempt_id)
+    store.save_worker(_make_worker_info("w-1"))
+    store.close()
 
-        service = CoordinatorService(state_store=CoordinatorStateStore(db_path))
-        service.orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        pending = service._restore_persisted_state()
+    service = CoordinatorService(state_store=CoordinatorStateStore(db_path))
+    service.orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    pending = service._restore_persisted_state()
 
-        assert pending == ["task-1"]
-        assert service.attempt_registry.get_attempt(stale.attempt_id).status == AttemptStatus.LOST
+    assert pending == ["task-1"]
+    assert service.attempt_registry.get_attempt(stale.attempt_id).status == AttemptStatus.LOST
 
-        service.registry.record_heartbeat("w-1", payload=HeartbeatPayload(worker_id="w-1"))
-        await service.orchestrator._process_workload("task-1")
+    service.registry.record_heartbeat("w-1", payload=HeartbeatPayload(worker_id="w-1"))
+    await service.orchestrator._process_workload("task-1")
 
-        assert call_count == 1
-        record = service.workload_registry.get_workload("task-1")
-        assert record.state == WorkloadState.COMPLETED
-        assert record.spec.workload_id == "task-1"  # stable workload_id
+    assert call_count == 1
+    record = service.workload_registry.get_workload("task-1")
+    assert record.state == WorkloadState.COMPLETED
+    assert record.spec.workload_id == "task-1"  # stable workload_id
 
-        attempts = service.attempt_registry.list_attempts_for_workload("task-1")
-        assert len(attempts) == 2  # the restored (now LOST) one, plus the new one
-        assert attempts[0].attempt_id == stale.attempt_id
-        assert attempts[0].status == AttemptStatus.LOST
-        assert attempts[1].status == AttemptStatus.SUCCEEDED
-        assert attempts[1].attempt_number == 2
+    attempts = service.attempt_registry.list_attempts_for_workload("task-1")
+    assert len(attempts) == 2  # the restored (now LOST) one, plus the new one
+    assert attempts[0].attempt_id == stale.attempt_id
+    assert attempts[0].status == AttemptStatus.LOST
+    assert attempts[1].status == AttemptStatus.SUCCEEDED
+    assert attempts[1].attempt_number == 2
+
+    service.state_store.close()
 
 
 # ============================================================================

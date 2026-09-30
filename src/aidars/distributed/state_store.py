@@ -29,6 +29,22 @@ except ImportError:  # pragma: no cover - fcntl is POSIX-only
     fcntl = None  # type: ignore[assignment]
     _HAS_FCNTL = False
 
+try:
+    import msvcrt
+    _HAS_MSVCRT = True
+except ImportError:  # pragma: no cover - msvcrt is Windows-only
+    msvcrt = None  # type: ignore[assignment]
+    _HAS_MSVCRT = False
+
+# Bug fix (post-M10): the single-writer lock previously only had an
+# fcntl (POSIX) implementation. `_HAS_FCNTL` is False on Windows, so
+# `_acquire_single_writer_lock()` was never even called there (see its
+# call site in __init__) -- a second CoordinatorStateStore on the same
+# path silently succeeded instead of raising CoordinatorAlreadyRunningError.
+# `_HAS_LOCK_PRIMITIVE` is the single flag both __init__ and close() now
+# branch on, backed by whichever of fcntl/msvcrt is actually available.
+_HAS_LOCK_PRIMITIVE = _HAS_FCNTL or _HAS_MSVCRT
+
 from aidars.distributed.artifact import (
     Artifact,
     ArtifactLifecycleState,
@@ -86,7 +102,7 @@ class CoordinatorStateStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._lock_fd = None
-        if enforce_single_writer and _HAS_FCNTL:
+        if enforce_single_writer and _HAS_LOCK_PRIMITIVE:
             self._acquire_single_writer_lock()
 
         self._lock = threading.RLock()
@@ -104,11 +120,29 @@ class CoordinatorStateStore:
         CoordinatorAlreadyRunningError) rather than blocking, because a
         second coordinator process starting up should be told
         immediately, not hang waiting for the first one to exit.
+
+        Cross-platform: fcntl.flock on POSIX, msvcrt.locking on Windows
+        (the two OS-level advisory/mandatory byte-range lock primitives
+        the standard library actually offers -- no third-party
+        dependency added). The lock file is opened "r+b" over content
+        that's ensured to exist (creating a fresh 1-byte file only if
+        one doesn't already exist) rather than "w", specifically so a
+        contending second process's open() call never truncates the
+        first process's still-locked file out from under it -- "w" mode
+        truncates on every open, which on Windows can race with (and
+        potentially corrupt the visibility of) an active msvcrt.locking()
+        byte-range lock held by another handle.
         """
         lock_path = self.db_path.parent / (self.db_path.name + _LOCK_FILE_SUFFIX)
-        fd = open(lock_path, "w")
+        if not lock_path.exists():
+            lock_path.write_bytes(b"\0")
+        fd = open(lock_path, "r+b")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if _HAS_FCNTL:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                fd.seek(0)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError as exc:
             fd.close()
             raise CoordinatorAlreadyRunningError(
@@ -120,6 +154,22 @@ class CoordinatorStateStore:
                 f"would require."
             ) from exc
         self._lock_fd = fd
+
+    def _release_single_writer_lock(self, fd) -> None:
+        """Cross-platform counterpart to _acquire_single_writer_lock().
+        Best-effort: an error unlocking is never allowed to prevent the
+        fd from being closed (close() releases any OS-held lock anyway
+        on both platforms; this just does it explicitly/promptly first
+        so a `close()`-then-immediately-reopen-same-path in the SAME
+        process, as several tests do, doesn't depend on close() alone)."""
+        try:
+            if _HAS_FCNTL:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            elif _HAS_MSVCRT:
+                fd.seek(0)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
 
     def __del__(self) -> None:
         self.close()
@@ -162,15 +212,21 @@ class CoordinatorStateStore:
         return results
 
     def close(self) -> None:
+        """Deterministic, idempotent release of both resources this
+        store may hold: the SQLite connection and (M10.15) the
+        single-writer lock file handle. Safe to call multiple times
+        (e.g. an explicit close() followed by __del__ finding nothing
+        left to do) and safe to call on a partially-constructed instance
+        (e.g. __init__ raised CoordinatorAlreadyRunningError before
+        self._conn was ever assigned) -- every attribute access below is
+        defensive via getattr() for exactly that reason.
+        """
         if getattr(self, "_conn", None) is not None:
             self._conn.close()
             self._conn = None
         lock_fd = getattr(self, "_lock_fd", None)
         if lock_fd is not None:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
+            self._release_single_writer_lock(lock_fd)
             lock_fd.close()
             self._lock_fd = None
 
