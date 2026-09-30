@@ -3,12 +3,12 @@
 Provides network-aware distributed asset caching, worker registry, peer discovery,
 and resilient streaming transfers.
 """
+
 from aidars.distributed.cas_adapter import (
     CASAdapter,
     LocalCASAdapter,
 )
 from aidars.distributed.client import DistributedClient
-from aidars.distributed.coordinator import CoordinatorService
 from aidars.distributed.metrics import (
     TransferEvent,
     TransferMetricsTracker,
@@ -68,6 +68,16 @@ from aidars.distributed.transfer import (
     transfer_asset_with_failover,
 )
 from aidars.distributed.worker import DistributedWorker
+
+
+def __getattr__(name):
+    """Lazily expose CoordinatorService to avoid the M7/distributed import cycle."""
+    if name == "CoordinatorService":
+        from aidars.distributed.coordinator import CoordinatorService
+
+        return CoordinatorService
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     # Models & Enums

@@ -9,10 +9,10 @@ supports a registered node that serves/receives assets but is never selected
 for compute placement.
 """
 from __future__ import annotations
+import time
 
 import asyncio
 import hashlib
-import time
 from pathlib import Path
 
 import httpx
@@ -25,6 +25,7 @@ from aidars.distributed.client import DistributedClient
 from aidars.distributed.coordinator import CoordinatorService
 from aidars.distributed.models import (
     WorkerInfo,
+    WorkerResourceProfile,
     WorkerRegistrationPayload,
     WorkerStatus,
     WorkloadExecutionResult,
@@ -163,6 +164,11 @@ async def test_master_excluded_from_placement_normal_worker_selected():
     registry.register_worker(WorkerInfo(
         worker_id="w-real", endpoint_url="http://real-worker", ip_address="127.0.0.1", port=8002,
         status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=WorkerResourceProfile(
+            timestamp_utc=time.time(), worker_id="w-real", endpoint_url="http://real-worker",
+            ip_address="127.0.0.1", cpu_cores_total=4, cpu_utilization_percent=0.0,
+            ram_total_bytes=4096, ram_available_bytes=4096,
+        ),
     ))
     registry.register_worker(WorkerInfo(
         worker_id="w-master", endpoint_url="http://master", ip_address="127.0.0.1", port=9000,
@@ -205,7 +211,7 @@ def test_normal_worker_placement_unaffected_by_can_execute_workloads_field():
     from aidars.distributed.models import WorkerResourceProfile
 
     spec = WorkloadSpec(workload_id="task-regress", task_type="test", min_ram_bytes=1024)
-    profile = WorkerResourceProfile(
+    profile = WorkerResourceProfile(timestamp_utc=time.time(),
         worker_id="w-normal", endpoint_url="http://127.0.0.1:8001", ip_address="127.0.0.1",
         cpu_cores_total=4, cpu_utilization_percent=10.0,
         ram_total_bytes=4096, ram_available_bytes=4096,

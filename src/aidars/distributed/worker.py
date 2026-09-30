@@ -29,6 +29,7 @@ from aidars.distributed.models import (
     WorkerMetrics,
     WorkerRegistrationPayload,
     WorkerRegistrationResponse,
+    WorkerResourceProfile,
     WorkerStatus,
     WorkloadSpec,
     WorkloadExecutionResult,
@@ -135,6 +136,31 @@ class DistributedWorker:
             return self.cas.get_inventory_hashes()
         return set()
 
+    def get_resource_profile(self) -> WorkerResourceProfile:
+        """Collect a fresh hardware snapshot using the existing monitor.
+
+        The coordinator owns scheduling state (status, inventory, and active
+        workload count), so those values are replaced from coordinator state
+        when the snapshot is received. Resource measurements themselves come
+        from this worker's monitor.
+        """
+        profile = self.resource_monitor.get_profile(
+            active_workload_count=0,
+            local_cached_hashes=self.inventory_hashes,
+        )
+        profile.status = self.status
+        profile.can_execute_workloads = self.can_execute_workloads
+
+        # Keep the existing general metrics current as well. available_bytes
+        # remains CAS capacity; physical RAM bytes live only in resource_profile.
+        self.node_metrics.cpu_percent = profile.cpu_utilization_percent
+        self.node_metrics.ram_percent = (
+            100.0 * (profile.ram_total_bytes - profile.ram_available_bytes)
+            / profile.ram_total_bytes
+            if profile.ram_total_bytes > 0 else 0.0
+        )
+        return profile
+
     def get_worker_info(self) -> WorkerInfo:
         """Construct WorkerInfo model snapshot."""
         stats = getattr(self.cas, "get_cas_stats", lambda: {})()
@@ -151,6 +177,7 @@ class DistributedWorker:
             inventory_hashes=self.inventory_hashes,
             last_heartbeat_utc=time.time(),
             last_metrics=self.node_metrics,
+            resource_profile=self.get_resource_profile(),
             can_execute_workloads=self.can_execute_workloads,
         )
 
@@ -211,6 +238,7 @@ class DistributedWorker:
             raise ValueError("Coordinator URL required for registration")
 
         current_inventory = self.inventory_hashes
+        resource_profile = self.get_resource_profile()
         payload = WorkerRegistrationPayload(
             worker_id=self.worker_id,
             endpoint_url=self.endpoint_url,
@@ -218,6 +246,7 @@ class DistributedWorker:
             port=self.port,
             capacity_bytes=self.capacity_bytes,
             used_bytes=self.node_metrics.used_bytes,
+            resource_profile=resource_profile,
             capabilities=self.capabilities,
             inventory_hashes=current_inventory,
             can_execute_workloads=self.can_execute_workloads,
@@ -240,6 +269,7 @@ class DistributedWorker:
         used = stats.get("total_bytes", 0)
         self.node_metrics.used_bytes = used
         self.node_metrics.available_bytes = max(0, self.capacity_bytes - used)
+        resource_profile = self.get_resource_profile()
 
         # Report inventory changes since the last successful heartbeat/
         # registration, so newly-ingested assets (e.g. a Master ingesting
@@ -253,6 +283,7 @@ class DistributedWorker:
             worker_id=self.worker_id,
             timestamp_utc=time.time(),
             metrics=self.node_metrics,
+            resource_profile=resource_profile,
             active_transfers=self.node_metrics.active_transfers,
             used_bytes=used,
             available_bytes=self.node_metrics.available_bytes,

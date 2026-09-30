@@ -259,6 +259,7 @@ class CoordinatorStateStore:
                     spec_json TEXT NOT NULL,
                     state TEXT NOT NULL,
                     placement_json TEXT,
+                    placement_explanation_json TEXT,
                     execution_result_json TEXT,
                     error_message TEXT,
                     submitted_at REAL NOT NULL,
@@ -266,6 +267,9 @@ class CoordinatorStateStore:
                     updated_at REAL NOT NULL
                 );
             """)
+            workload_columns = {row[1] for row in cursor.execute("PRAGMA table_info(workloads)").fetchall()}
+            if "placement_explanation_json" not in workload_columns:
+                cursor.execute("ALTER TABLE workloads ADD COLUMN placement_explanation_json TEXT")
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_workloads_state
                 ON workloads(state);
@@ -400,6 +404,7 @@ class CoordinatorStateStore:
                 if record.placement_decision is not None
                 else None
             )
+            placement_explanation_json = json.dumps(record.placement_explanation) if record.placement_explanation else None
             execution_result_json = (
                 record.execution_result.model_dump_json()
                 if record.execution_result is not None
@@ -407,14 +412,15 @@ class CoordinatorStateStore:
             )
             self._conn.execute("""
                 INSERT INTO workloads (
-                    workload_id, spec_json, state, placement_json,
+                    workload_id, spec_json, state, placement_json, placement_explanation_json,
                     execution_result_json, error_message, submitted_at,
                     completed_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workload_id) DO UPDATE SET
                     spec_json = excluded.spec_json,
                     state = excluded.state,
                     placement_json = excluded.placement_json,
+                    placement_explanation_json = excluded.placement_explanation_json,
                     execution_result_json = excluded.execution_result_json,
                     error_message = excluded.error_message,
                     submitted_at = excluded.submitted_at,
@@ -425,6 +431,7 @@ class CoordinatorStateStore:
                 record.spec.model_dump_json(),
                 record.state.value,
                 placement_json,
+                placement_explanation_json,
                 execution_result_json,
                 record.error_message,
                 record.submitted_at,
@@ -456,6 +463,11 @@ class CoordinatorStateStore:
             PlacementDecision.model_validate_json(row["placement_json"])
             if row["placement_json"] is not None
             else None
+        )
+        record.placement_explanation = (
+            json.loads(row["placement_explanation_json"])
+            if "placement_explanation_json" in row.keys() and row["placement_explanation_json"]
+            else {}
         )
         record.execution_result = (
             WorkloadExecutionResult.model_validate_json(row["execution_result_json"])

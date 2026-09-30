@@ -1,5 +1,5 @@
-import asyncio
 import time
+import asyncio
 import pytest
 from typing import Dict, Any
 
@@ -112,7 +112,7 @@ async def test_predictive_recovery_e2e(tmp_path):
     # Let's run the placement engine manually to see where it goes.
     profiles = []
     for info in coord.registry.list_workers(active_only=True): # active_only will STILL include it unless we filtered it, but we filtered in evaluate()
-        profiles.append(WorkerResourceProfile(
+        profiles.append(WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id=info.worker_id,
             endpoint_url=info.endpoint_url,
             ip_address=info.ip_address,

@@ -56,6 +56,7 @@ from aidars.distributed.workload_registry import (
     WorkloadIdConflictError,
     WorkloadRecord,
     WorkloadRegistry,
+    WorkloadState,
 )
 from aidars.distributed.workload import WorkloadOrchestrator
 
@@ -200,6 +201,7 @@ class CoordinatorService:
     async def stop(self) -> None:
         """Stop the background eviction task gracefully."""
         if not self._running:
+            await self.orchestrator.stop_queue()
             return
         self._running = False
         if self._eviction_task:
@@ -217,6 +219,7 @@ class CoordinatorService:
             except asyncio.CancelledError:
                 pass
             self._health_task = None
+        await self.orchestrator.stop_queue()
 
         logger.info("CoordinatorService %s stopped.", self.coordinator_id)
 
@@ -367,7 +370,16 @@ class CoordinatorService:
         reconciliation are explicitly out of scope for this phase.
         """
         for workload_id in workload_ids:
-            asyncio.create_task(self.orchestrator._process_workload(workload_id))
+            record = self.workload_registry.get_workload(workload_id)
+            print("API RECORD EXPLANATION:", record.placement_explanation if record else None)
+            print("API RECORD DECISION:", record.placement_decision if record else None)
+            if record is not None and record.state not in TERMINAL_WORKLOAD_STATES:
+                # Re-enter the single admission queue while preserving the durable
+                # WorkloadRecord and its original submitted_at age.
+                self.workload_registry.set_placement(workload_id, None)
+                self.workload_registry.set_placement_explanation(workload_id, {})
+                self.workload_registry.update_state(workload_id, WorkloadState.SUBMITTED)
+                self.orchestrator.enqueue_workload(workload_id)
 
     async def _run_eviction_loop(self) -> None:
         """Periodic loop that purges expired dead workers and decays penalties."""
@@ -478,6 +490,18 @@ class CoordinatorService:
 
     def register_worker_sync(self, payload: WorkerRegistrationPayload) -> WorkerRegistrationResponse:
         """Register worker programmatically without HTTP overhead."""
+        received_at = time.time()
+        resource_profile = None
+        if payload.resource_profile is not None and payload.resource_profile.timestamp_utc is not None:
+            resource_profile = payload.resource_profile.model_copy(update={
+                "worker_id": payload.worker_id,
+                "endpoint_url": payload.endpoint_url,
+                "ip_address": payload.ip_address,
+                "status": WorkerStatus.ACTIVE,
+                "local_cached_hashes": set(payload.inventory_hashes),
+                "timestamp_utc": received_at,
+                "can_execute_workloads": payload.can_execute_workloads,
+            })
         worker_info = WorkerInfo(
             worker_id=payload.worker_id,
             endpoint_url=payload.endpoint_url,
@@ -489,9 +513,10 @@ class CoordinatorService:
             used_bytes=payload.used_bytes,
             capabilities=payload.capabilities,
             inventory_hashes=payload.inventory_hashes,
-            last_heartbeat_utc=time.time(),
-            registered_at_utc=time.time(),
+            last_heartbeat_utc=received_at,
+            registered_at_utc=received_at,
             tags=payload.tags,
+            resource_profile=resource_profile,
             can_execute_workloads=payload.can_execute_workloads,
         )
         registered = self.registry.register_worker(worker_info)
@@ -737,12 +762,12 @@ class CoordinatorService:
 
             # Route to M7 Ingestor
             worker = self.registry.get_worker(worker_id)
-            if worker and worker.last_metrics:
+            if worker and worker.resource_profile:
                 self.m7_ingestor.on_worker_heartbeat(
                     worker_id=worker_id,
-                    cpu_utilization_percent=worker.last_metrics.cpu_percent,
-                    ram_total=worker.capacity_bytes or 0,
-                    ram_available=worker.available_bytes,
+                    cpu_utilization_percent=worker.resource_profile.cpu_utilization_percent,
+                    ram_total=worker.resource_profile.ram_total_bytes,
+                    ram_available=worker.resource_profile.ram_available_bytes,
                     failed=False,
                     latency_ms=0.0  # TODO: compute from RTT
                 )
@@ -883,30 +908,81 @@ class CoordinatorService:
         )
         async def get_workload_status(workload_id: str) -> Dict[str, Any]:
             record = self.workload_registry.get_workload(workload_id)
+
             if not record:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Workload '{workload_id}' not found.",
                 )
-            
+
+            # M11: Prefer the persisted detailed placement explanation.
+            # Fall back to the legacy PlacementDecision-derived explanation
+            # only when no explicit explanation has been recorded.
+            if record.placement_explanation:
+                placement_explanation = record.placement_explanation
+            elif record.placement_decision:
+                placement_explanation = {
+                    "candidates": record.placement_decision.candidate_explanations,
+                    "eligible_worker_ids": [
+                        c["worker_id"]
+                        for c in record.placement_decision.candidate_explanations
+                        if c.get("eligible")
+                    ],
+                    "selected_worker_id": record.placement_decision.selected_worker_id,
+                }
+            else:
+                placement_explanation = {}
+
             resp = {
                 "workload_id": workload_id,
                 "state": record.state.value,
                 "submitted_at": record.submitted_at,
                 "completed_at": record.completed_at,
                 "error_message": record.error_message,
+                "placement_explanation": placement_explanation,
+                "queue": self.orchestrator.queue_snapshot(workload_id),
+                "scheduling": {
+                    "priority": record.spec.priority,
+                    "normalized_priority": min(100, record.spec.priority),
+                    "effective_priority_range": [0, 100],
+                    "priority_direction": "larger_is_higher",
+                    "admission_queue": {
+                        "max_dispatch_tasks": self.orchestrator.max_dispatch_tasks,
+                        "responsibility": "workload_admission_order_only",
+                    },
+                    "aging": {
+                        "points_per_minute": 10,
+                        "maximum_bonus": 100,
+                        "age_source": "original_submitted_at",
+                        "starvation_override_after_seconds": (
+                            self.orchestrator.STARVATION_PREVENTION_SECONDS
+                        ),
+                        "override_order": (
+                            "oldest_submitted_at_then_workload_id"
+                        ),
+                    },
+                    "deadline_state": self.orchestrator._deadline_state(
+                        record.spec,
+                        time.time(),
+                    ),
+                    "deadline_at_utc": record.spec.deadline_at_utc,
+                    "affinity_group_id": record.spec.affinity_group_id,
+                    "affinity_mode": record.spec.affinity_mode,
+                    "affinity_tag_key": record.spec.affinity_tag_key,
+                },
             }
+
             if record.placement_decision:
                 resp["placement"] = record.placement_decision.model_dump()
+
             if record.execution_result:
                 resp["result"] = record.execution_result.model_dump()
 
             # M10.17: expose attempt/retry/timing/checkpoint state through
-            # the existing workload API surface rather than a new
-            # endpoint. Same require_admin auth as the rest of this route
-            # -- never exposes worker credentials (attempt summaries only
-            # carry worker_id, not any credential material).
-            attempts = self.attempt_registry.list_attempts_for_workload(workload_id)
+            # the existing workload API surface rather than a new endpoint.
+            attempts = self.attempt_registry.list_attempts_for_workload(
+                workload_id
+            )
             resp["attempts"] = [a.to_summary_dict() for a in attempts]
             resp["attempt_count"] = len(attempts)
 

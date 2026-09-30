@@ -89,6 +89,7 @@ class WorkloadRecord:
         self.submitted_at = time.time()
         self.completed_at: Optional[float] = None
         self.placement_decision: Optional[PlacementDecision] = None
+        self.placement_explanation: dict = {}
         self.execution_result: Optional[WorkloadExecutionResult] = None
         self.error_message: Optional[str] = None
 
@@ -175,12 +176,14 @@ class WorkloadRegistry:
         self._persist_workload(snapshot)
         return True
 
-    def set_placement(self, workload_id: str, decision: PlacementDecision) -> bool:
+    def set_placement(self, workload_id: str, decision: Optional[PlacementDecision]) -> bool:
         with self._lock:
             record = self._workloads.get(workload_id)
             if not record:
                 return False
             record.placement_decision = decision
+            if decision is not None:
+                record.error_message = None
             snapshot = copy.deepcopy(record)
         self._persist_workload(snapshot)
         return True
@@ -196,6 +199,16 @@ class WorkloadRegistry:
             else:
                 record.state = WorkloadState.FAILED
             record.completed_at = time.time()
+            snapshot = copy.deepcopy(record)
+        self._persist_workload(snapshot)
+        return True
+
+    def set_placement_explanation(self, workload_id: str, explanation: dict) -> bool:
+        with self._lock:
+            record = self._workloads.get(workload_id)
+            if not record:
+                return False
+            record.placement_explanation = copy.deepcopy(explanation)
             snapshot = copy.deepcopy(record)
         self._persist_workload(snapshot)
         return True

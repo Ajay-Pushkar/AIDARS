@@ -7,6 +7,7 @@ else to fake.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import httpx
@@ -17,7 +18,7 @@ from aidars.distributed.job_registry import (
     JobRegistry,
     JobState,
 )
-from aidars.distributed.models import WorkloadExecutionResult, WorkloadSpec
+from aidars.distributed.models import WorkloadExecutionResult, WorkloadSpec, WorkerResourceProfile
 from aidars.distributed.registry import WorkerRegistry
 from aidars.distributed.state_store import CoordinatorStateStore
 from aidars.distributed.workload import WorkloadOrchestrator
@@ -79,6 +80,11 @@ async def test_job_id_propagates_to_workload_specs_via_submit_job():
     registry.register_worker(__import__("aidars.distributed.models", fromlist=["WorkerInfo"]).WorkerInfo(
         worker_id="w-1", endpoint_url="http://w1", ip_address="127.0.0.1", port=8001,
         capacity_bytes=999999999, used_bytes=0,
+        resource_profile=WorkerResourceProfile(
+            timestamp_utc=time.time(), worker_id="w-1", endpoint_url="http://w1",
+            ip_address="127.0.0.1", cpu_cores_total=4, cpu_utilization_percent=0.0,
+            ram_total_bytes=16 * 1024**3, ram_available_bytes=16 * 1024**3,
+        ),
     ))
 
     job_id = await orch.submit_job([_spec("w1")])
@@ -133,6 +139,7 @@ async def test_single_workload_submission_remains_backward_compatible():
     workload_id = await orch.submit_workload(_spec("solo"))
     assert workload_id == "solo"
     assert wr.get_workload("solo").spec.job_id is None
+    await orch.stop_queue()
 
 
 # ============================================================================

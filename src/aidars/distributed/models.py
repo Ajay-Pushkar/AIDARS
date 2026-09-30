@@ -11,10 +11,10 @@ import json
 import re
 import time
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Literal, Optional, Set
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ============================================================================
@@ -233,6 +233,10 @@ class WorkerRegistrationPayload(BaseModel):
     hostname: Optional[str] = Field(default=None, max_length=256)
     capacity_bytes: int = Field(default=0, ge=0)
     used_bytes: int = Field(default=0, ge=0)
+    resource_profile: Optional[WorkerResourceProfile] = Field(
+        default=None,
+        description="Latest worker hardware telemetry. Optional for compatibility; absent telemetry cannot be used for compute placement.",
+    )
     capabilities: WorkerCapabilities = Field(default_factory=WorkerCapabilities)
     inventory_hashes: Set[str] = Field(default_factory=set)
     tags: Dict[str, str] = Field(default_factory=dict)
@@ -307,6 +311,10 @@ class WorkerInfo(BaseModel):
     penalty_score: float = Field(default=0.0, ge=0.0)
     registered_at_utc: float = Field(default_factory=time.time)
     last_metrics: Optional[WorkerMetrics] = None
+    resource_profile: Optional[WorkerResourceProfile] = Field(
+        default=None,
+        description="Latest resource telemetry snapshot, timestamped at coordinator receipt and persisted with this worker record.",
+    )
     tags: Dict[str, str] = Field(default_factory=dict)
     can_execute_workloads: bool = Field(
         default=True,
@@ -357,6 +365,10 @@ class HeartbeatPayload(BaseModel):
     worker_id: str = Field(..., min_length=1)
     timestamp_utc: float = Field(default_factory=time.time)
     metrics: Optional[WorkerMetrics] = None
+    resource_profile: Optional[WorkerResourceProfile] = Field(
+        default=None,
+        description="Refreshed worker hardware telemetry. Missing telemetry is not treated as fresh.",
+    )
     active_transfers: int = Field(default=0, ge=0)
     used_bytes: Optional[int] = Field(default=None, ge=0)
     available_bytes: Optional[int] = Field(default=None, ge=0)
@@ -654,12 +666,35 @@ class WorkloadSpec(BaseModel):
 
     estimated_duration_seconds: float = Field(default=10.0, gt=0.0)
     priority: int = Field(default=100, ge=0)
+    deadline_at_utc: Optional[float] = Field(
+        default=None, gt=0,
+        description="Optional absolute UTC Unix timestamp. Affects admission urgency only; it is not an execution timeout.",
+    )
+    required_gpu_vendor: Optional[str] = None
+    required_gpu_model: Optional[str] = None
+    min_compute_capability: Optional[str] = None
+    required_driver_version: Optional[str] = None
+    required_runtime_compatibility: Optional[str] = None
+    required_worker_tags: Dict[str, str] = Field(default_factory=dict)
+    preferred_worker_tags: Dict[str, str] = Field(default_factory=dict)
+    affinity_group_id: Optional[str] = Field(default=None, max_length=128)
+    affinity_mode: Literal["none", "same_worker", "different_worker", "same_tag", "different_tag"] = "none"
+    affinity_tag_key: Optional[str] = Field(default=None, max_length=128)
+    affinity_hard: bool = True
     parameters: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("input_asset_hashes")
     @classmethod
     def validate_hashes(cls, v: Set[str]) -> Set[str]:
         return {validate_sha256_hex(h) for h in v}
+
+    @model_validator(mode="after")
+    def validate_affinity(self) -> "WorkloadSpec":
+        if self.affinity_mode != "none" and not self.affinity_group_id:
+            raise ValueError("affinity_group_id is required when affinity_mode is not 'none'")
+        if self.affinity_mode in ("same_tag", "different_tag") and not self.affinity_tag_key:
+            raise ValueError("affinity_tag_key is required for tag-scoped affinity")
+        return self
 
     @field_validator("parameters")
     @classmethod
@@ -695,6 +730,10 @@ class WorkerResourceProfile(BaseModel):
 
     gpu_available: bool = Field(default=False)
     gpu_device_name: Optional[str] = None
+    gpu_vendor: Optional[str] = None
+    gpu_model: Optional[str] = None
+    gpu_compute_capability: Optional[str] = None
+    gpu_driver_version: Optional[str] = None
     vram_total_bytes: int = Field(default=0, ge=0)
     vram_available_bytes: int = Field(default=0, ge=0)
 
@@ -702,11 +741,22 @@ class WorkerResourceProfile(BaseModel):
     max_concurrent_workloads: int = Field(default=10, ge=1)
     status: WorkerStatus = Field(default=WorkerStatus.ACTIVE)
     local_cached_hashes: Set[str] = Field(default_factory=set)
-    timestamp_utc: float = Field(default_factory=time.time)
+    timestamp_utc: Optional[float] = Field(
+        default=None,
+        description="Telemetry sample or coordinator receipt time; None means freshness is unknown.",
+    )
     can_execute_workloads: bool = Field(
         default=True,
         description="Whether this node accepts compute workload placement, or exists purely as a CAS/asset source.",
     )
+
+
+# WorkerResourceProfile is declared after the wire and persistence models to
+# keep the existing model organization. Resolve these annotations once the
+# complete module has loaded.
+WorkerRegistrationPayload.model_rebuild()
+WorkerInfo.model_rebuild()
+HeartbeatPayload.model_rebuild()
 
 
 class PlacementDecision(BaseModel):
@@ -720,6 +770,16 @@ class PlacementDecision(BaseModel):
     missing_assets_on_worker: Set[str]
     execution_tier: str  # "local", "subnet", "lan"
     decision_timestamp_utc: float = Field(default_factory=time.time)
+    candidate_explanations: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Additive per-candidate hard eligibility and soft ranking facts; absent on legacy records.",
+    )
+    m7_ranking_adjustments: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Per-worker ordinal rank movement after M7 advisory reordering; not part of placement_score.",
+    )
+    locality_details: Dict[str, Any] = Field(default_factory=dict)
+    deadline_details: Dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkloadExecutionResult(BaseModel):
@@ -780,4 +840,3 @@ class WorkloadExecutionResult(BaseModel):
             + self.output_ingestion_duration_seconds
             + self.verification_duration_seconds
         )
-

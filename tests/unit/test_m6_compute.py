@@ -1,7 +1,7 @@
 """M6 Adaptive Computational Resource System tests."""
+import time
 
 import pytest
-import time
 import asyncio
 from pydantic import ValidationError
 
@@ -46,7 +46,7 @@ def test_6_3_placement_hard_filters():
     )
 
     profiles = [
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="w1",
             endpoint_url="http://127.0.0.1:8001",
             ip_address="127.0.0.1",
@@ -56,7 +56,7 @@ def test_6_3_placement_hard_filters():
             ram_available_bytes=1024, # Fails min_ram
             gpu_available=True,
         ),
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="w2",
             endpoint_url="http://127.0.0.1:8002",
             ip_address="127.0.0.1",
@@ -82,7 +82,7 @@ def test_6_4_placement_multi_score():
     )
 
     profiles = [
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="w1",
             endpoint_url="http://127.0.0.1:8001",
             ip_address="127.0.0.1",
@@ -92,7 +92,7 @@ def test_6_4_placement_multi_score():
             ram_available_bytes=2048,
             gpu_available=False,
         ),
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="w2",
             endpoint_url="http://127.0.0.1:8002",
             ip_address="127.0.0.1",
@@ -142,13 +142,13 @@ def test_6_5_data_locality_bias():
     )
     # w1 has identical compute to w2 but has local cache
     profiles = [
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="w1", endpoint_url="http://w1", ip_address="1.1.1.1",
             cpu_cores_total=4, cpu_utilization_percent=0,
             ram_total_bytes=4096, ram_available_bytes=4096,
             local_cached_hashes={h1, h2}
         ),
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="w2", endpoint_url="http://w2", ip_address="2.2.2.2",
             cpu_cores_total=4, cpu_utilization_percent=0,
             ram_total_bytes=4096, ram_available_bytes=4096,
@@ -216,7 +216,7 @@ def test_can_execute_workloads_default_profile_remains_eligible():
         task_type="test",
         min_ram_bytes=1024,
     )
-    profile = WorkerResourceProfile(
+    profile = WorkerResourceProfile(timestamp_utc=time.time(),
         worker_id="w-default",
         endpoint_url="http://127.0.0.1:8001",
         ip_address="127.0.0.1",
@@ -244,7 +244,7 @@ def test_can_execute_workloads_false_is_never_selected_despite_ample_resources()
         requires_gpu=False,
     )
 
-    cas_only_profile = WorkerResourceProfile(
+    cas_only_profile = WorkerResourceProfile(timestamp_utc=time.time(),
         worker_id="w-cas-only",
         endpoint_url="http://127.0.0.1:8001",
         ip_address="127.0.0.1",
@@ -263,7 +263,7 @@ def test_can_execute_workloads_false_is_never_selected_despite_ample_resources()
 
     # Alongside a modest real worker: the real worker must win even though
     # the CAS-only node looks far better on every resource axis.
-    real_worker = WorkerResourceProfile(
+    real_worker = WorkerResourceProfile(timestamp_utc=time.time(),
         worker_id="w-real",
         endpoint_url="http://127.0.0.1:8002",
         ip_address="127.0.0.1",
@@ -289,7 +289,7 @@ def test_can_execute_workloads_does_not_change_existing_scoring_behavior():
         min_ram_bytes=1024,
     )
     profiles = [
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="w-low",
             endpoint_url="http://127.0.0.1:8001",
             ip_address="127.0.0.1",
@@ -298,7 +298,7 @@ def test_can_execute_workloads_does_not_change_existing_scoring_behavior():
             ram_total_bytes=4096,
             ram_available_bytes=2048,
         ),
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="w-high",
             endpoint_url="http://127.0.0.1:8002",
             ip_address="127.0.0.1",

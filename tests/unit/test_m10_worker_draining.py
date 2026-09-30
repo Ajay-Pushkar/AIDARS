@@ -7,6 +7,7 @@ there), and exercises the new DRAINING -> ACTIVE revival path added to
 CoordinatorService._evaluate_cluster_health_loop.
 """
 from __future__ import annotations
+import time
 
 import httpx
 import pytest
@@ -122,13 +123,13 @@ def test_placement_engine_excludes_draining_workers():
     engine = PlacementEngine()
     spec = WorkloadSpec(workload_id="task-1", task_type="test", min_ram_bytes=1024, min_cpu_cores=1)
 
-    draining_profile = WorkerResourceProfile(
+    draining_profile = WorkerResourceProfile(timestamp_utc=time.time(),
         worker_id="w-draining", endpoint_url="http://w1", ip_address="127.0.0.1",
         cpu_cores_total=8, cpu_utilization_percent=0.0,
         ram_total_bytes=16_000_000_000, ram_available_bytes=16_000_000_000,
         status=WorkerStatus.DRAINING,
     )
-    active_profile = WorkerResourceProfile(
+    active_profile = WorkerResourceProfile(timestamp_utc=time.time(),
         worker_id="w-active", endpoint_url="http://w2", ip_address="127.0.0.2",
         cpu_cores_total=8, cpu_utilization_percent=0.0,
         ram_total_bytes=16_000_000_000, ram_available_bytes=16_000_000_000,
@@ -143,7 +144,7 @@ def test_placement_engine_excludes_draining_workers():
 def test_placement_engine_returns_none_when_only_draining_workers_exist():
     engine = PlacementEngine()
     spec = WorkloadSpec(workload_id="task-1", task_type="test", min_ram_bytes=1024)
-    draining_profile = WorkerResourceProfile(
+    draining_profile = WorkerResourceProfile(timestamp_utc=time.time(),
         worker_id="w-draining", endpoint_url="http://w1", ip_address="127.0.0.1",
         cpu_cores_total=8, cpu_utilization_percent=0.0,
         ram_total_bytes=16_000_000_000, ram_available_bytes=16_000_000_000,

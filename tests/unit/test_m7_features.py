@@ -1,4 +1,5 @@
 """Tests for the M7 Feature Extraction."""
+import time
 
 from aidars.m7.features import FeatureExtractor, WorkerFeatureVector, WorkloadFeatureVector
 from aidars.m7.telemetry import WorkerTemporalState
@@ -6,7 +7,7 @@ from aidars.distributed.models import WorkerResourceProfile, WorkloadSpec
 
 def test_extract_worker_features():
     """Test extracting worker features from raw profiles and telemetry."""
-    profile = WorkerResourceProfile(
+    profile = WorkerResourceProfile(timestamp_utc=time.time(),
         worker_id="w-1",
         endpoint_url="http://127.0.0.1:8001",
         ip_address="127.0.0.1",

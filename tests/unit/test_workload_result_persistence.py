@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import httpx
 import pytest
+import time
 
 from aidars.distributed.models import (
     WorkerInfo,
+    WorkerResourceProfile,
     WorkerStatus,
     WorkloadExecutionResult,
     WorkloadSpec,
@@ -31,6 +33,11 @@ def _make_orchestrator_with_one_worker(handler):
     registry.register_worker(WorkerInfo(
         worker_id="w-1", endpoint_url="http://worker-1", ip_address="127.0.0.1", port=8001,
         status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=WorkerResourceProfile(
+            timestamp_utc=time.time(), worker_id="w-1", endpoint_url="http://worker-1",
+            ip_address="127.0.0.1", cpu_cores_total=4, cpu_utilization_percent=0.0,
+            ram_total_bytes=16 * 1024**3, ram_available_bytes=16 * 1024**3,
+        ),
     ))
     orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return orchestrator, workload_registry
@@ -188,7 +195,7 @@ async def test_checkpointed_result_does_not_persist_execution_result():
     await orchestrator._process_workload("task-checkpoint")
 
     record = workload_registry.get_workload("task-checkpoint")
-    assert record.state == WorkloadState.MIGRATING
+    assert record.state == WorkloadState.SUBMITTED
     assert record.execution_result is None
 
 

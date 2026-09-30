@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import httpx
 import pytest
+import time
 
 from aidars.distributed.attempt import AttemptRegistry, AttemptStatus
 from aidars.distributed.models import (
     FailureCategory,
     WorkerInfo,
+    WorkerResourceProfile,
     WorkerStatus,
     WorkloadExecutionResult,
     WorkloadSpec,
@@ -20,6 +22,14 @@ from aidars.distributed.registry import WorkerRegistry
 from aidars.distributed.retry import DEFAULT_MAX_ATTEMPTS
 from aidars.distributed.workload import WorkloadOrchestrator
 from aidars.distributed.workload_registry import WorkloadRegistry, WorkloadState
+
+
+def _resource_profile(worker_id, endpoint_url, ip_address):
+    return WorkerResourceProfile(
+        timestamp_utc=time.time(), worker_id=worker_id, endpoint_url=endpoint_url,
+        ip_address=ip_address, cpu_cores_total=8, cpu_utilization_percent=0.0,
+        ram_total_bytes=16 * 1024**3, ram_available_bytes=16 * 1024**3,
+    )
 
 
 def _make_orchestrator(handler, max_attempts=DEFAULT_MAX_ATTEMPTS):
@@ -33,6 +43,7 @@ def _make_orchestrator(handler, max_attempts=DEFAULT_MAX_ATTEMPTS):
     registry.register_worker(WorkerInfo(
         worker_id="w-1", endpoint_url="http://worker-1", ip_address="127.0.0.1", port=8001,
         status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("w-1", "http://worker-1", "127.0.0.1"),
     ))
     orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return orchestrator, workload_registry, attempt_registry
@@ -116,6 +127,7 @@ async def test_none_attempt_registry_preserves_pre_m10_behavior():
     registry.register_worker(WorkerInfo(
         worker_id="w-1", endpoint_url="http://worker-1", ip_address="127.0.0.1", port=8001,
         status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("w-1", "http://worker-1", "127.0.0.1"),
     ))
     orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     workload_registry.add_workload(WorkloadSpec(workload_id="task-1", task_type="test", min_ram_bytes=1024))
@@ -179,6 +191,7 @@ async def test_dispatch_exception_is_worker_unavailable_and_retryable():
     registry.register_worker(WorkerInfo(
         worker_id="w-1", endpoint_url="http://worker-1", ip_address="127.0.0.1", port=8001,
         status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("w-1", "http://worker-1", "127.0.0.1"),
     ))
     orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     workload_registry.add_workload(WorkloadSpec(workload_id="task-1", task_type="test", min_ram_bytes=1024))
@@ -187,15 +200,14 @@ async def test_dispatch_exception_is_worker_unavailable_and_retryable():
 
     attempts = attempt_registry.list_attempts_for_workload("task-1")
     # Only one worker exists, and it's excluded from this workload's
-    # remaining attempts after failing once -- so the retry loop's
-    # SECOND attempt finds no placement candidate at all (UNSCHEDULABLE),
-    # rather than dispatching to the same broken worker again.
+    # remaining attempts after failing once. With M11 admission semantics,
+    # temporary lack of an eligible worker leaves the original workload
+    # pending for reconsideration and does not manufacture another attempt.
     assert attempts[0].failure_category == FailureCategory.WORKER_UNAVAILABLE
     assert attempts[0].status == AttemptStatus.FAILED
-    assert len(attempts) == 2
-    assert attempts[1].failure_category == FailureCategory.WORKER_UNAVAILABLE
+    assert len(attempts) == 1
     record = workload_registry.get_workload("task-1")
-    assert record.state == WorkloadState.UNSCHEDULABLE
+    assert record.state == WorkloadState.SUBMITTED
 
 
 # ============================================================================
@@ -293,10 +305,12 @@ async def test_placement_recovery_retries_a_different_worker_after_dispatch_fail
     registry.register_worker(WorkerInfo(
         worker_id="worker-b", endpoint_url="http://worker-b", ip_address="1.1.1.1", port=8001,
         status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("worker-b", "http://worker-b", "1.1.1.1"),
     ))
     registry.register_worker(WorkerInfo(
         worker_id="worker-c", endpoint_url="http://worker-c", ip_address="2.2.2.2", port=8002,
         status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("worker-c", "http://worker-c", "2.2.2.2"),
     ))
     orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     workload_registry.add_workload(WorkloadSpec(workload_id="task-1", task_type="test", min_ram_bytes=1024))

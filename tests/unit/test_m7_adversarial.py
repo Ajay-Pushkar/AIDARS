@@ -1,4 +1,5 @@
 """Adversarial testing for the M7 Intelligence Layer."""
+import time
 
 from aidars.m7.controller import M7OrchestratorBridge
 from aidars.m7.telemetry import TelemetryMemory
@@ -19,7 +20,7 @@ def test_adversarial_memory_poisoning_isolation():
     )
     
     candidates = [
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="w-normal",
             endpoint_url="http://normal",
             ip_address="127.0.0.1",
@@ -29,7 +30,7 @@ def test_adversarial_memory_poisoning_isolation():
             ram_available_bytes=16000,
             gpu_available=False
         ),
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="w-poisoned",
             endpoint_url="http://poison",
             ip_address="127.0.0.2",
@@ -77,7 +78,7 @@ def test_adversarial_oracle_denial():
     )
     
     candidates = [
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="w-blank",
             endpoint_url="http://blank",
             ip_address="127.0.0.1",

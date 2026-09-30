@@ -18,6 +18,7 @@ from aidars.distributed.models import (
     WorkerStatus,
     WorkloadExecutionResult,
     WorkloadSpec,
+    WorkerResourceProfile,
 )
 from aidars.distributed.state_store import CoordinatorStateStore
 from aidars.distributed.workload_registry import WorkloadRecord, WorkloadState
@@ -32,6 +33,22 @@ def _make_worker_info(worker_id: str = "w-1", status: WorkerStatus = WorkerStatu
     return WorkerInfo(
         worker_id=worker_id, endpoint_url=f"http://{worker_id}", ip_address="127.0.0.1", port=8001,
         status=status, capacity_bytes=4096, used_bytes=0, last_heartbeat_utc=time.time(),
+    )
+
+
+def _resource_profile(worker_id: str = "w-1") -> WorkerResourceProfile:
+    return WorkerResourceProfile(
+        worker_id=worker_id,
+        endpoint_url=f"http://{worker_id}",
+        ip_address="127.0.0.1",
+        cpu_cores_total=4,
+        cpu_utilization_percent=0.0,
+        ram_total_bytes=8 * 1024**3,
+        ram_available_bytes=8 * 1024**3,
+        gpu_available=False,
+        vram_total_bytes=0,
+        vram_available_bytes=0,
+        timestamp_utc=time.time(),
     )
 
 
@@ -201,7 +218,9 @@ async def test_redrive_after_restart_creates_a_new_attempt_not_a_new_workload(tm
     stale = attempt_registry.create_attempt("task-1")
     attempt_registry.mark_assigned(stale.attempt_id, "w-1")
     attempt_registry.mark_running(stale.attempt_id)
-    store.save_worker(_make_worker_info("w-1"))
+    worker = _make_worker_info("w-1")
+    worker.resource_profile = _resource_profile("w-1")
+    store.save_worker(worker)
     store.close()
 
     service = CoordinatorService(state_store=CoordinatorStateStore(db_path))
@@ -211,7 +230,26 @@ async def test_redrive_after_restart_creates_a_new_attempt_not_a_new_workload(tm
     assert pending == ["task-1"]
     assert service.attempt_registry.get_attempt(stale.attempt_id).status == AttemptStatus.LOST
 
-    service.registry.record_heartbeat("w-1", payload=HeartbeatPayload(worker_id="w-1"))
+    service.registry.record_heartbeat("w-1", payload=HeartbeatPayload(
+        worker_id="w-1",
+        resource_profile=_resource_profile("w-1"),
+    ))
+    profiles = service.orchestrator._build_worker_profiles(
+    service.registry.list_workers(active_only=False)
+)
+
+    decision = service.orchestrator.placement_engine.evaluate(
+        service.workload_registry.get_workload("task-1").spec,
+        profiles,
+        worker_tags={
+            w.worker_id: dict(w.tags)
+            for w in service.registry.list_workers(active_only=False)
+        },
+    )
+
+    print("PROFILES:", profiles)
+    print("EVALUATION:", service.orchestrator.placement_engine.last_evaluation)
+    print("DECISION:", decision)
     await service.orchestrator._process_workload("task-1")
 
     assert call_count == 1

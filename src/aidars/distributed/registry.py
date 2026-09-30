@@ -470,6 +470,24 @@ class WorkerRegistry:
                 if payload.inventory_delta_removed:
                     self._remove_worker_hashes_locked(worker_id, payload.inventory_delta_removed)
 
+                if payload.resource_profile is None or payload.resource_profile.timestamp_utc is None:
+                    # A heartbeat without a timestamped hardware snapshot is
+                    # still a liveness proof, but it is not compute telemetry.
+                    worker.resource_profile = None
+                else:
+                    # Hardware readings are worker-provided, but their
+                    # receipt timestamp and coordinator-owned fields are not.
+                    # Re-stamp at receipt to avoid relying on worker clock sync.
+                    worker.resource_profile = payload.resource_profile.model_copy(update={
+                        "worker_id": worker.worker_id,
+                        "endpoint_url": worker.endpoint_url,
+                        "ip_address": worker.ip_address,
+                        "status": worker.status,
+                        "local_cached_hashes": set(worker.inventory_hashes),
+                        "timestamp_utc": now,
+                        "can_execute_workloads": worker.can_execute_workloads,
+                    })
+
             health = self._health_records.get(worker_id)
             if health and health.health_status == WorkerHealthStatus.DEAD:
                 health.health_status = WorkerHealthStatus.HEALTHY
@@ -484,6 +502,11 @@ class WorkerRegistry:
             if worker.status == WorkerStatus.OFFLINE:
                 worker.status = WorkerStatus.ACTIVE
                 logger.info("Worker %s verified live via heartbeat after restore; marked ACTIVE.", worker_id)
+            if worker.resource_profile is not None:
+                # Keep this persisted coordinator snapshot in sync with the
+                # coordinator-owned lifecycle fields. Placement also overlays
+                # these values when constructing its per-decision profile.
+                worker.resource_profile.status = worker.status
 
             snapshot = worker.model_copy(deep=True)
         self._persist_worker(snapshot)

@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import httpx
 import pytest
+import time
 
 from aidars.distributed.artifact import ArtifactRegistry
 from aidars.distributed.attempt import AttemptRegistry
 from aidars.distributed.job_registry import CompletionPolicy, JobRegistry
-from aidars.distributed.models import FailureCategory, WorkerInfo, WorkerStatus, WorkloadExecutionResult, WorkloadSpec
+from aidars.distributed.models import FailureCategory, WorkerInfo, WorkerResourceProfile, WorkerStatus, WorkloadExecutionResult, WorkloadSpec
 from aidars.distributed.registry import WorkerRegistry
 from aidars.distributed.workload import WorkloadOrchestrator
 from aidars.distributed.workload_registry import WorkloadRegistry, WorkloadState
@@ -37,6 +38,11 @@ def _make_full_orchestrator(handler):
     registry.register_worker(WorkerInfo(
         worker_id="w-1", endpoint_url="http://worker-1", ip_address="127.0.0.1", port=8001,
         status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=WorkerResourceProfile(
+            timestamp_utc=time.time(), worker_id="w-1", endpoint_url="http://worker-1",
+            ip_address="127.0.0.1", cpu_cores_total=4, cpu_utilization_percent=0.0,
+            ram_total_bytes=16 * 1024**3, ram_available_bytes=16 * 1024**3,
+        ),
     ))
     orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return orchestrator, workload_registry, attempt_registry, job_registry, artifact_registry

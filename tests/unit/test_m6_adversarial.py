@@ -1,3 +1,4 @@
+import time
 import pytest
 import asyncio
 from typing import Set
@@ -23,13 +24,13 @@ def test_a1_resource_admission():
     engine = PlacementEngine()
     
     profiles = [
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="WorkerA", endpoint_url="http://A", ip_address="1.1.1.1",
             cpu_cores_total=8, cpu_utilization_percent=0.0,
             ram_total_bytes=16 * 1024**3, ram_available_bytes=16 * 1024**3,
             gpu_available=True
         ),
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="WorkerB", endpoint_url="http://B", ip_address="2.2.2.2",
             cpu_cores_total=4, cpu_utilization_percent=0.0,
             ram_total_bytes=8 * 1024**3, ram_available_bytes=8 * 1024**3,
@@ -61,12 +62,24 @@ async def test_b1_placement_recovery():
     registry.register_worker(WorkerInfo(
         worker_id="WorkerB", endpoint_url="http://b", ip_address="1.1.1.1",
         cpu_cores_total=4, capacity_bytes=10*1024**3, used_bytes=0, port=8001,
-        last_heartbeat_utc=now
+        last_heartbeat_utc=now,
+        resource_profile=WorkerResourceProfile(
+            timestamp_utc=now, worker_id="WorkerB", endpoint_url="http://b",
+            ip_address="1.1.1.1", cpu_cores_total=4,
+            cpu_utilization_percent=0.0, ram_total_bytes=16*1024**3,
+            ram_available_bytes=16*1024**3,
+        ),
     ))
     registry.register_worker(WorkerInfo(
         worker_id="WorkerC", endpoint_url="http://c", ip_address="2.2.2.2",
         cpu_cores_total=4, capacity_bytes=10*1024**3, used_bytes=0, port=8002,
-        last_heartbeat_utc=now
+        last_heartbeat_utc=now,
+        resource_profile=WorkerResourceProfile(
+            timestamp_utc=now, worker_id="WorkerC", endpoint_url="http://c",
+            ip_address="2.2.2.2", cpu_cores_total=4,
+            cpu_utilization_percent=0.0, ram_total_bytes=16*1024**3,
+            ram_available_bytes=16*1024**3,
+        ),
     ))
     
     orch = WorkloadOrchestrator(registry, WorkloadRegistry())

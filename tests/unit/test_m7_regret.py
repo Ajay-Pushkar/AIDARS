@@ -1,3 +1,4 @@
+import time
 import random
 import statistics
 from typing import List, Dict
@@ -70,7 +71,7 @@ def test_m7_placement_regret_vs_m6():
     )
     
     candidates = [
-        WorkerResourceProfile(worker_id=wid, endpoint_url="http://x", ip_address="127.0.0.1", cpu_cores_total=8, cpu_utilization_percent=0.0, ram_total_bytes=16000, ram_available_bytes=16000, gpu_available=False, active_workload_count=0, max_concurrent_workloads=10)
+        WorkerResourceProfile(timestamp_utc=time.time(), worker_id=wid, endpoint_url="http://x", ip_address="127.0.0.1", cpu_cores_total=8, cpu_utilization_percent=0.0, ram_total_bytes=16000, ram_available_bytes=16000, gpu_available=False, active_workload_count=0, max_concurrent_workloads=10)
         for wid in env.worker_truth.keys()
     ]
     

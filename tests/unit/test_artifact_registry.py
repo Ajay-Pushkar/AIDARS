@@ -1,6 +1,7 @@
 """M8.8/M8.9: Artifact model, provenance, lifecycle, and GC eligibility."""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import httpx
@@ -12,7 +13,7 @@ from aidars.distributed.artifact import (
     ArtifactVerificationState,
     make_artifact_id,
 )
-from aidars.distributed.models import WorkerInfo, WorkloadExecutionResult, WorkloadSpec
+from aidars.distributed.models import WorkerInfo, WorkerResourceProfile, WorkloadExecutionResult, WorkloadSpec
 from aidars.distributed.registry import WorkerRegistry
 from aidars.distributed.state_store import CoordinatorStateStore
 from aidars.distributed.workload import WorkloadOrchestrator
@@ -93,6 +94,11 @@ async def test_orchestrator_records_artifacts_on_completed_result():
     registry.register_worker(WorkerInfo(
         worker_id="w-1", endpoint_url="http://worker-1", ip_address="127.0.0.1", port=8001,
         capacity_bytes=999999999, used_bytes=0,
+        resource_profile=WorkerResourceProfile(
+            timestamp_utc=time.time(), worker_id="w-1", endpoint_url="http://worker-1",
+            ip_address="127.0.0.1", cpu_cores_total=4, cpu_utilization_percent=0.0,
+            ram_total_bytes=16 * 1024**3, ram_available_bytes=16 * 1024**3,
+        ),
     ))
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -126,6 +132,11 @@ async def test_orchestrator_without_artifact_registry_does_not_error():
     registry.register_worker(WorkerInfo(
         worker_id="w-1", endpoint_url="http://worker-1", ip_address="127.0.0.1", port=8001,
         capacity_bytes=999999999, used_bytes=0,
+        resource_profile=WorkerResourceProfile(
+            timestamp_utc=time.time(), worker_id="w-1", endpoint_url="http://worker-1",
+            ip_address="127.0.0.1", cpu_cores_total=4, cpu_utilization_percent=0.0,
+            ram_total_bytes=16 * 1024**3, ram_available_bytes=16 * 1024**3,
+        ),
     ))
     orch.http_client = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda r: httpx.Response(200, json=WorkloadExecutionResult(

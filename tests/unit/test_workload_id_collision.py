@@ -15,6 +15,7 @@ spec2's.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import httpx
 import pytest
@@ -22,7 +23,7 @@ from fastapi.testclient import TestClient
 
 from aidars.distributed.coordinator import CoordinatorService
 from aidars.distributed.job_registry import JobRegistry
-from aidars.distributed.models import WorkerInfo, WorkerStatus, WorkloadExecutionResult, WorkloadSpec
+from aidars.distributed.models import WorkerInfo, WorkerResourceProfile, WorkerStatus, WorkloadExecutionResult, WorkloadSpec
 from aidars.distributed.registry import WorkerRegistry
 from aidars.distributed.workload import WorkloadOrchestrator
 from aidars.distributed.workload_registry import WorkloadIdConflictError, WorkloadRegistry
@@ -127,6 +128,11 @@ async def test_submit_workload_propagates_conflict_and_does_not_dispatch():
     registry.register_worker(WorkerInfo(
         worker_id="w-1", endpoint_url="http://worker-1", ip_address="127.0.0.1", port=8001,
         capacity_bytes=999999999, used_bytes=0,
+        resource_profile=WorkerResourceProfile(
+            timestamp_utc=time.time(), worker_id="w-1", endpoint_url="http://worker-1",
+            ip_address="127.0.0.1", cpu_cores_total=4, cpu_utilization_percent=0.0,
+            ram_total_bytes=16 * 1024**3, ram_available_bytes=16 * 1024**3,
+        ),
     ))
 
     await orch.submit_workload(WorkloadSpec(workload_id="dup", job_id="job-A", task_type="test", min_ram_bytes=1024))
@@ -136,9 +142,10 @@ async def test_submit_workload_propagates_conflict_and_does_not_dispatch():
         await orch.submit_workload(WorkloadSpec(workload_id="dup", job_id="job-B", task_type="test", min_ram_bytes=2048))
 
     # Only job-A's dispatch happened; the conflicting job-B submission
-    # never reached the create_task/dispatch step.
+    # never reached the queue/admission step.
     await asyncio.sleep(0.05)
     assert wr.get_workload("dup").spec.job_id == "job-A"
+    await orch.stop_queue()
 
 
 @pytest.mark.asyncio
@@ -160,6 +167,7 @@ async def test_submit_job_propagates_conflict_for_colliding_workload_id():
         await orch.submit_job([WorkloadSpec(workload_id="dup", job_id="job-C", task_type="test", min_ram_bytes=4096)])
 
     assert wr.get_workload("dup").spec.job_id == "job-A"
+    await orch.stop_queue()
 
 
 # ============================================================================
@@ -190,6 +198,7 @@ async def test_submit_job_still_delegates_only_through_submit_workload(monkeypat
     ])
 
     assert calls == ["c0", "c1"]
+    await orch.stop_queue()
 
 
 # ============================================================================

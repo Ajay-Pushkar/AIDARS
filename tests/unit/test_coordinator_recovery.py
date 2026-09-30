@@ -31,6 +31,7 @@ from aidars.distributed.models import (
     WorkerStatus,
     WorkloadExecutionResult,
     WorkloadSpec,
+    WorkerResourceProfile,
 )
 from aidars.distributed.registry import WorkerRegistry
 from aidars.distributed.state_store import CoordinatorStateStore
@@ -61,6 +62,22 @@ def _make_record(workload_id: str, state: WorkloadState, **result_kwargs) -> Wor
             workload_id=workload_id, worker_id="w-1", **result_kwargs
         )
     return record
+
+
+def _resource_profile(worker_id: str = "w-1") -> WorkerResourceProfile:
+    return WorkerResourceProfile(
+        worker_id=worker_id,
+        endpoint_url="http://127.0.0.1:8001",
+        ip_address="127.0.0.1",
+        cpu_cores_total=4,
+        cpu_utilization_percent=0.0,
+        ram_total_bytes=8 * 1024**3,
+        ram_available_bytes=8 * 1024**3,
+        gpu_available=False,
+        vram_total_bytes=0,
+        vram_available_bytes=0,
+        timestamp_utc=time.time(),
+    )
 
 
 # ============================================================================
@@ -273,7 +290,10 @@ async def test_recovered_workload_dispatches_through_existing_placement_path(tmp
     # coordinator crashed. The worker may have actually finished the work;
     # the coordinator has no way to know that.
     store.save_workload(_make_record("task-1", WorkloadState.PLACED))
-    store.save_worker(_make_worker_info(status=WorkerStatus.ACTIVE))
+    store.save_worker(_make_worker_info(
+        status=WorkerStatus.ACTIVE,
+        resource_profile=_resource_profile(),
+    ))
 
     service = CoordinatorService(state_store=store)
     service.orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -285,7 +305,10 @@ async def test_recovered_workload_dispatches_through_existing_placement_path(tmp
     # ...and only becomes eligible once it proves liveness, exactly as a
     # real worker process would after reconnecting to the restarted
     # coordinator: a fresh heartbeat.
-    service.registry.record_heartbeat("w-1", payload=HeartbeatPayload(worker_id="w-1"))
+    service.registry.record_heartbeat("w-1", payload=HeartbeatPayload(
+        worker_id="w-1",
+        resource_profile=_resource_profile(),
+    ))
     assert service.registry.get_worker("w-1").status == WorkerStatus.ACTIVE
 
     await service.orchestrator._process_workload("task-1")
@@ -311,11 +334,15 @@ async def test_redrive_delegates_to_existing_process_workload(tmp_path: Path, mo
 
     async def fake_process_workload(workload_id: str) -> None:
         calls.append(workload_id)
+        service.workload_registry.update_state(workload_id, WorkloadState.COMPLETED)
 
     monkeypatch.setattr(service.orchestrator, "_process_workload", fake_process_workload)
 
+    for workload_id in ("task-1", "task-2"):
+        service.workload_registry.add_workload(WorkloadSpec(workload_id=workload_id, task_type="test"))
     service._redrive_recovered_workloads(["task-1", "task-2"])
-    await asyncio.sleep(0)  # let the fire-and-forget tasks run once
+    await asyncio.sleep(0.05)
+    await service.orchestrator.stop_queue()
 
     assert sorted(calls) == ["task-1", "task-2"]
 

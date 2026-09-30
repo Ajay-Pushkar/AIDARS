@@ -1,4 +1,5 @@
 """Tests for M7 Orchestrator Bridge."""
+import time
 
 from aidars.m7.controller import M7OrchestratorBridge
 from aidars.m7.telemetry import TelemetryMemory
@@ -20,7 +21,7 @@ def test_evaluate_candidates():
     )
     
     candidates = [
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="w-safe",
             endpoint_url="http://safe",
             ip_address="127.0.0.1",
@@ -30,7 +31,7 @@ def test_evaluate_candidates():
             ram_available_bytes=16000,
             gpu_available=False
         ),
-        WorkerResourceProfile(
+        WorkerResourceProfile(timestamp_utc=time.time(),
             worker_id="w-risky",
             endpoint_url="http://risky",
             ip_address="127.0.0.2",

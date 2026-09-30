@@ -7,6 +7,7 @@ where a Job now sits alongside them.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import httpx
@@ -15,7 +16,14 @@ import pytest
 from aidars.distributed.artifact import ArtifactLifecycleState
 from aidars.distributed.coordinator import CoordinatorService
 from aidars.distributed.job_registry import CompletionPolicy, JobState
-from aidars.distributed.models import WorkerInfo, WorkerStatus, WorkloadExecutionResult, WorkloadSpec
+from aidars.distributed.models import (
+    HeartbeatPayload,
+    WorkerInfo,
+    WorkerResourceProfile,
+    WorkerStatus,
+    WorkloadExecutionResult,
+    WorkloadSpec,
+)
 from aidars.distributed.state_store import CoordinatorStateStore
 from aidars.distributed.workload_registry import WorkloadRecord, WorkloadState
 
@@ -35,6 +43,19 @@ def _worker(worker_id="w-1"):
     return WorkerInfo(
         worker_id=worker_id, endpoint_url="http://127.0.0.1:8001", ip_address="127.0.0.1", port=8001,
         status=WorkerStatus.ACTIVE, capacity_bytes=999999999, used_bytes=0,
+        resource_profile=WorkerResourceProfile(
+            worker_id=worker_id,
+            endpoint_url="http://127.0.0.1:8001",
+            ip_address="127.0.0.1",
+            cpu_cores_total=4,
+            cpu_utilization_percent=0.0,
+            ram_total_bytes=8 * 1024**3,
+            ram_available_bytes=8 * 1024**3,
+            gpu_available=False,
+            vram_total_bytes=0,
+            vram_available_bytes=0,
+            timestamp_utc=time.time(),
+        ),
     )
 
 
@@ -158,7 +179,9 @@ async def test_recovered_job_non_terminal_workload_redriven_through_existing_dis
     assert pending == ["c0"]
 
     # Prove liveness the same way a real restarted worker would.
-    service.registry.record_heartbeat("w-1")
+    service.registry.record_heartbeat("w-1", payload=HeartbeatPayload(
+        worker_id="w-1", resource_profile=_worker().resource_profile,
+    ))
 
     # Redrive via the exact existing dispatcher -- same call
     # _redrive_recovered_workloads() makes, not a parallel mechanism.
@@ -212,7 +235,9 @@ async def test_recovered_in_flight_workload_can_duplicate_compute_and_is_recorde
     service = CoordinatorService(state_store=store)
     service.orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     pending = service._restore_persisted_state()
-    service.registry.record_heartbeat("w-1")
+    service.registry.record_heartbeat("w-1", payload=HeartbeatPayload(
+        worker_id="w-1", resource_profile=_worker().resource_profile,
+    ))
 
     await service.orchestrator._process_workload(pending[0])
 

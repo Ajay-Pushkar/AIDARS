@@ -5,14 +5,15 @@ Ties together models, placement, and registry to drive a workload from SUBMITTED
 
 import asyncio
 import logging
+import time
 import uuid
 import httpx
 from typing import List, Optional, Set
 
 from aidars.distributed.artifact import ArtifactRegistry
-from aidars.distributed.attempt import AttemptRegistry
+from aidars.distributed.attempt import AttemptRegistry, AttemptStatus
 from aidars.distributed.job_registry import CompletionPolicy, JobRegistry
-from aidars.distributed.models import FailureCategory, WorkloadSpec, WorkloadExecutionResult
+from aidars.distributed.models import FailureCategory, WorkerStatus, WorkloadSpec, WorkloadExecutionResult
 from aidars.distributed.placement import PlacementEngine
 from aidars.distributed.registry import WorkerRegistry
 from aidars.distributed.retry import DEFAULT_MAX_ATTEMPTS, should_retry
@@ -24,6 +25,8 @@ logger = logging.getLogger(__name__)
 class WorkloadOrchestrator:
     """Central orchestrator for workload lifecycle on the Coordinator."""
 
+    STARVATION_PREVENTION_SECONDS = 600.0
+
     def __init__(
         self,
         registry: WorkerRegistry,
@@ -34,11 +37,16 @@ class WorkloadOrchestrator:
         artifact_registry: Optional[ArtifactRegistry] = None,
         attempt_registry: Optional[AttemptRegistry] = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        max_dispatch_tasks: int = 16,
     ) -> None:
         self.registry = registry
         self.workload_registry = workload_registry
         self.m7_ingestor = m7_ingestor
         self.placement_engine = PlacementEngine(m7_bridge=m7_bridge)
+        # Serializes placement through coordinator-side attempt assignment so
+        # simultaneous submissions cannot all consume the same concurrency
+        # slot based on an identical snapshot.
+        self._placement_lock = asyncio.Lock()
 
         # M8: optional -- lazily constructed on first use by submit_job()
         # if not injected, so every existing caller/test that only ever
@@ -53,15 +61,189 @@ class WorkloadOrchestrator:
         # already established for job_registry/artifact_registry above.
         self.attempt_registry = attempt_registry
         self.max_attempts = max_attempts
+        self.max_dispatch_tasks = max(1, int(max_dispatch_tasks))
+        self._queue_event = asyncio.Event()
+        self._queue_task: Optional[asyncio.Task] = None
+        self._dispatch_tasks: Set[asyncio.Task] = set()
+        self._queued_ids: Set[str] = set()
+        self._processing_ids: Set[str] = set()
 
     async def submit_workload(self, spec: WorkloadSpec) -> str:
         """Submit a new workload for execution. Returns the workload_id."""
         record = self.workload_registry.add_workload(spec)
 
-        # Asynchronously process the placement and execution
-        asyncio.create_task(self._process_workload(spec.workload_id))
+        self.enqueue_workload(spec.workload_id)
 
         return spec.workload_id
+
+    def enqueue_workload(self, workload_id: str) -> None:
+        """Queue an existing durable workload record for admission."""
+        if workload_id in self._processing_ids:
+            return
+        record = self.workload_registry.get_workload(workload_id)
+        if record is None or record.state in (WorkloadState.COMPLETED, WorkloadState.FAILED,
+                                               WorkloadState.TIMEOUT, WorkloadState.UNSCHEDULABLE):
+            return
+        self._queued_ids.add(workload_id)
+        self._ensure_queue_task()
+        self._queue_event.set()
+
+    def enqueue_recovered_workloads(self, workload_ids: List[str]) -> None:
+        for workload_id in workload_ids:
+            self.enqueue_workload(workload_id)
+
+    def _ensure_queue_task(self) -> None:
+        if self._queue_task is None or self._queue_task.done():
+            self._queue_task = asyncio.create_task(self._admission_queue_loop())
+
+    def _effective_priority(self, record, now: float) -> float:
+        # Effective priority is 0..100 (larger is more urgent); values above
+        # 100 from legacy callers are accepted but saturated for ordering.
+        # Aging adds at most 100 points at 10 points/minute. A separate 10-minute oldest-first
+        # promotion guarantees service even under a continuous stream of
+        # newly arriving higher-priority/deadline-urgent work.
+        age_minutes = max(0.0, now - record.submitted_at) / 60.0
+        normalized_priority = min(100.0, float(record.spec.priority))
+        return (normalized_priority + min(100.0, age_minutes * 10.0)
+                + self._deadline_priority_bonus(record.spec, now))
+
+    def _predicted_duration(self, spec: WorkloadSpec) -> tuple[Optional[float], float]:
+        """Use M7's observed duration EMA when available; otherwise use the
+        declared deterministic estimate as a soft fallback, never as a guarantee.
+        """
+        memory = getattr(self.placement_engine.m7_bridge, "memory", None)
+        state = memory.get_workload_state(spec.task_type) if memory is not None else None
+        if state is not None and state.duration_ema.initialized and state.duration_ema.value > 0:
+            return float(state.duration_ema.value), float(state.duration_ema.value)
+        return None, float(spec.estimated_duration_seconds)
+
+    def _deadline_priority_bonus(self, spec: WorkloadSpec, now: float) -> float:
+        if spec.deadline_at_utc is None:
+            return 0.0
+        _, duration = self._predicted_duration(spec)
+        slack = spec.deadline_at_utc - now - duration
+        if spec.deadline_at_utc < now or slack <= 0:
+            return 100.0
+        # Within ten predicted durations, urgency grows deterministically
+        # toward a bounded 100 point bonus. Farther deadlines add no urgency.
+        return max(0.0, 100.0 - (slack / max(duration, 1.0)) * 10.0) if slack <= 10 * duration else 0.0
+
+    def _trusted_asset_sizes(self, spec: WorkloadSpec) -> dict:
+        """Reuse verified Artifact sizes. Missing/unverified sizes stay unknown;
+        configured bandwidth caps and caller estimates are not used as byte facts.
+        """
+        if self.artifact_registry is None:
+            return {}
+        sizes = {}
+        for artifact in self.artifact_registry.list_artifacts():
+            verification = getattr(artifact.verification_state, "value", artifact.verification_state)
+            if (artifact.content_hash in spec.input_asset_hashes and verification == "verified"
+                    and artifact.size_bytes is not None and artifact.size_bytes >= 0):
+                sizes[artifact.content_hash] = artifact.size_bytes
+        return sizes
+
+    def queue_snapshot(self, workload_id: Optional[str] = None) -> List[dict]:
+        now = time.time()
+        rows = []
+        for record in self.workload_registry.list_workloads():
+            wid = record.spec.workload_id
+            is_dispatching = wid in self._processing_ids
+            if record.state != WorkloadState.SUBMITTED and not is_dispatching:
+                continue
+            predicted_duration, _ = self._predicted_duration(record.spec)
+            rows.append({"workload_id": wid, "state": "dispatching" if is_dispatching else "pending",
+                         "priority": record.spec.priority,
+                         "normalized_priority": min(100, record.spec.priority),
+                         "effective_priority": self._effective_priority(record, now),
+                         "deadline_priority_bonus": self._deadline_priority_bonus(record.spec, now),
+                         "submitted_at": record.submitted_at,
+                         "deadline_at_utc": record.spec.deadline_at_utc,
+                         "deadline_state": self._deadline_state(record.spec, now),
+                         "predicted_duration_seconds": predicted_duration,
+                         "duration_estimate_source": "m7_history" if predicted_duration is not None else "workload_estimate_fallback",
+                         "starvation_override": now - record.submitted_at >= self.STARVATION_PREVENTION_SECONDS,
+                         "queued": record.spec.workload_id in self._queued_ids,
+                         "dispatching": record.spec.workload_id in self._processing_ids})
+        rows.sort(key=lambda r: (0, r["submitted_at"], r["workload_id"])
+                  if r["starvation_override"] else
+                  (1, -r["effective_priority"], r["submitted_at"], r["workload_id"]))
+        pending_index = 0
+        for row in rows:
+            if row["state"] == "pending":
+                pending_index += 1
+                row["queue_position"] = pending_index
+            else:
+                row["queue_position"] = None
+        return [row for row in rows if workload_id is None or row["workload_id"] == workload_id]
+
+    def _deadline_state(self, spec: WorkloadSpec, now: float) -> str:
+        if spec.deadline_at_utc is None:
+            return "none"
+        if spec.deadline_at_utc < now:
+            return "expired"
+        _, duration = self._predicted_duration(spec)
+        return "approaching" if spec.deadline_at_utc - now <= duration else "future"
+
+    async def _admission_queue_loop(self) -> None:
+        while True:
+            if not self._queued_ids and not self._processing_ids:
+                return
+            now = time.time()
+            pending = [self.workload_registry.get_workload(wid) for wid in self._queued_ids]
+            pending = [r for r in pending if r is not None and r.state == WorkloadState.SUBMITTED
+                       and r.spec.workload_id not in self._processing_ids]
+            pending.sort(key=lambda r: (
+                0 if now - r.submitted_at >= self.STARVATION_PREVENTION_SECONDS else 1,
+                r.submitted_at if now - r.submitted_at >= self.STARVATION_PREVENTION_SECONDS else -self._effective_priority(r, now),
+                r.spec.workload_id,
+            ))
+            while pending and len(self._processing_ids) < self.max_dispatch_tasks:
+                record = pending.pop(0)
+                wid = record.spec.workload_id
+                self._queued_ids.discard(wid)
+                self._processing_ids.add(wid)
+                task = asyncio.create_task(self._run_queued_workload(wid))
+                self._dispatch_tasks.add(task)
+            self._queue_event.clear()
+            try:
+                await asyncio.wait_for(self._queue_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                # Reconsider pending workloads after resource/liveness changes,
+                # even if an event was missed during a coordinator restart.
+                for record in self.workload_registry.list_workloads():
+                    if record.state == WorkloadState.SUBMITTED and record.spec.workload_id not in self._processing_ids:
+                        self._queued_ids.add(record.spec.workload_id)
+
+    async def _run_queued_workload(self, workload_id: str) -> None:
+        try:
+            await self._process_workload(workload_id)
+        finally:
+            record = self.workload_registry.get_workload(workload_id)
+            current = asyncio.current_task()
+            try:
+                if (record is not None and record.state == WorkloadState.SUBMITTED
+                        and current is not None and current.cancelling() == 0):
+                    self._queued_ids.add(workload_id)
+                    await asyncio.sleep(1.0)
+            finally:
+                self._processing_ids.discard(workload_id)
+                if current is not None:
+                    self._dispatch_tasks.discard(current)
+                self._queue_event.set()
+
+    async def stop_queue(self) -> None:
+        if self._queue_task is not None:
+            self._queue_task.cancel()
+            try:
+                await self._queue_task
+            except asyncio.CancelledError:
+                pass
+            self._queue_task = None
+        tasks = list(self._dispatch_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def submit_job(
         self,
@@ -109,30 +291,35 @@ class WorkloadOrchestrator:
         return job_id
 
     def _build_worker_profiles(self, workers):
-        """Snapshot the given WorkerInfo list into WorkerResourceProfile
-        candidates for PlacementEngine.evaluate(). Extracted, unmodified
-        logic (was previously inlined once per dispatch attempt)."""
-        from aidars.distributed.models import WorkerResourceProfile
-        import time as _time
-
+        """Merge worker hardware snapshots with coordinator-owned state."""
         profiles = []
         for info in workers:
-            if not info.is_healthy:
+            telemetry = info.resource_profile
+            if telemetry is None:
                 continue
-            profiles.append(WorkerResourceProfile(
-                worker_id=info.worker_id,
-                endpoint_url=info.endpoint_url,
-                ip_address=info.ip_address,
-                cpu_cores_total=info.cpu_cores_total if hasattr(info, 'cpu_cores_total') and info.cpu_cores_total else 8,
-                cpu_utilization_percent=info.last_metrics.cpu_percent if info.last_metrics else 0.0,
-                ram_total_bytes=info.capacity_bytes or 8_000_000_000,
-                ram_available_bytes=info.available_bytes,
-                active_workload_count=0,  # Placeholder
-                status=info.status,
-                local_cached_hashes=info.inventory_hashes,
-                timestamp_utc=_time.time(),
-                can_execute_workloads=info.can_execute_workloads,
-            ))
+
+            if self.attempt_registry is not None:
+                active_count = len(self.attempt_registry.list_running_attempts_for_worker(info.worker_id))
+            else:
+                # Compatibility for standalone orchestrators created without
+                # the M10 attempt ledger: derive active work from the existing
+                # workload registry rather than inventing a zero count.
+                active_count = sum(
+                    1 for record in self.workload_registry.list_workloads()
+                    if record.state == WorkloadState.PLACED
+                    and record.placement_decision is not None
+                    and record.placement_decision.selected_worker_id == info.worker_id
+                )
+
+            profiles.append(telemetry.model_copy(update={
+                "worker_id": info.worker_id,
+                "endpoint_url": info.endpoint_url,
+                "ip_address": info.ip_address,
+                "active_workload_count": active_count,
+                "status": info.status,
+                "local_cached_hashes": set(info.inventory_hashes),
+                "can_execute_workloads": info.can_execute_workloads,
+            }))
         return profiles
 
     async def _process_workload(self, workload_id: str) -> None:
@@ -160,7 +347,14 @@ class WorkloadOrchestrator:
         # Placing
         self.workload_registry.update_state(workload_id, WorkloadState.PLACING)
 
-        attempts_used = self.attempt_registry.count_attempts(workload_id) if self.attempt_registry else 0
+        attempt_records = self.attempt_registry.list_attempts_for_workload(workload_id) if self.attempt_registry else []
+        # A checkpointed success resumes the same logical workload and is
+        # explicitly outside the retry budget; other durable attempts count.
+        attempts_used = sum(
+            1 for attempt in attempt_records
+            if not (attempt.status == AttemptStatus.SUCCEEDED and attempt.execution_result is not None
+                    and attempt.execution_result.was_checkpointed)
+        )
         # Workers this WORKLOAD's own retry loop has already tried and
         # failed to dispatch to. Scoped to this one workload_id's
         # attempts only -- deliberately NOT the same thing as
@@ -172,35 +366,113 @@ class WorkloadOrchestrator:
         # identical decision), defeating the point of retrying on a
         # different candidate.
         exhausted_worker_ids: Set[str] = set()
+        if self.attempt_registry is not None:
+            exhausted_worker_ids = {
+                attempt.worker_id
+                for attempt in attempt_records
+                if(
+                    attempt.worker_id is not None
+                    and attempt.failure_category == FailureCategory.WORKER_UNAVAILABLE
+                    and attempt.status != AttemptStatus.LOST
+                )
+            }
+        if attempts_used >= self.max_attempts and attempts_used > 0:
+            self.workload_registry.update_state(
+                workload_id, WorkloadState.FAILED,
+                error_message="Retry budget exhausted after prior execution attempts",
+            )
+            return
 
         while True:
             attempts_used += 1
             attempt_id: Optional[str] = None
-            if self.attempt_registry is not None:
-                attempt = self.attempt_registry.create_attempt(workload_id)
-                attempt_id = attempt.attempt_id
 
-            workers = [
-                w for w in self.registry.list_workers(active_only=True)
-                if w.worker_id not in exhausted_worker_ids
-            ]
-            profiles = self._build_worker_profiles(workers)
+            async with self._placement_lock:
+                all_workers = self.registry.list_workers(active_only=False)
+                workers = [
+                    w for w in all_workers
+                    if w.worker_id not in exhausted_worker_ids
+                ]
+                profiles = self._build_worker_profiles(workers)
 
-            decision = self.placement_engine.evaluate(spec, profiles)
-            if not decision:
-                self.workload_registry.update_state(
-                    workload_id, WorkloadState.UNSCHEDULABLE, error_message="No suitable worker found"
+                group_workers: dict = {}
+                if spec.affinity_group_id:
+                    group_workers[spec.affinity_group_id] = {
+                        r.placement_decision.selected_worker_id
+                        for r in self.workload_registry.list_workloads()
+                        if r.spec.workload_id != workload_id
+                        and r.spec.affinity_group_id == spec.affinity_group_id
+                        and r.placement_decision is not None
+                    }
+                decision = self.placement_engine.evaluate(
+                    spec, profiles,
+                    worker_tags={w.worker_id: dict(w.tags) for w in workers},
+                    group_workers=group_workers,
+                    predicted_duration_seconds=self._predicted_duration(spec)[0],
+                    asset_sizes_bytes=self._trusted_asset_sizes(spec),
                 )
-                if attempt_id:
-                    self.attempt_registry.mark_failed(
-                        attempt_id, FailureCategory.WORKER_UNAVAILABLE, "No suitable worker found"
+                evaluation = dict(self.placement_engine.last_evaluation)
+                evaluated_ids = {c.get("worker_id") for c in evaluation.get("candidates", [])}
+                for worker in all_workers:
+                    if worker.worker_id in evaluated_ids:
+                        continue
+                    if worker.worker_id in exhausted_worker_ids:
+                        evaluation.setdefault("candidates", []).append({
+                            "worker_id": worker.worker_id, "worker_status": worker.status.value,
+                            "health_eligible": worker.is_healthy,
+                            "can_execute_workloads": worker.can_execute_workloads,
+                            "eligible": False,
+                            "rejection_reasons": ["WORKER_PREVIOUSLY_FAILED_THIS_WORKLOAD"],
+                            "checks": {"retry_exclusion": {"result": False,
+                                "reason": "prior WORKER_UNAVAILABLE attempt"}},
+                        })
+                        continue
+                    if worker.resource_profile is None:
+                        missing_reasons = ["MISSING_TELEMETRY"]
+                        if worker.status != WorkerStatus.ACTIVE:
+                            missing_reasons.append("WORKER_NOT_ACTIVE")
+                        if not worker.is_healthy:
+                            missing_reasons.append("WORKER_UNHEALTHY")
+                        if not worker.can_execute_workloads:
+                            missing_reasons.append("WORKER_CANNOT_EXECUTE")
+                        evaluation.setdefault("candidates", []).append({
+                            "worker_id": worker.worker_id, "worker_status": worker.status.value,
+                            "health_eligible": worker.is_healthy,
+                            "can_execute_workloads": worker.can_execute_workloads,
+                            "eligible": False, "rejection_reasons": missing_reasons,
+                            "checks": {"status": {"actual": worker.status.value,
+                                "result": worker.status == WorkerStatus.ACTIVE},
+                                "health": {"actual": worker.status.value,
+                                "result": worker.is_healthy},
+                                "can_execute_workloads": {"actual": worker.can_execute_workloads,
+                                "result": worker.can_execute_workloads},
+                                "telemetry": {"age_seconds": None,
+                                "maximum_age_seconds": self.placement_engine.STALE_PROFILE_SECONDS,
+                                "result": False}},
+                        })
+                if not decision:
+                    self.workload_registry.set_placement_explanation(workload_id, evaluation)
+                    self.workload_registry.set_placement(workload_id, None)
+                    if spec.required_runtime_compatibility:
+                        self.workload_registry.update_state(
+                            workload_id, WorkloadState.UNSCHEDULABLE,
+                            error_message="Required GPU runtime compatibility cannot be reported by the current worker telemetry",
+                        )
+                        return
+                    self.workload_registry.update_state(
+                        workload_id, WorkloadState.SUBMITTED,
+                        error_message="Waiting for an eligible worker; placement will be reconsidered",
                     )
-                return
+                    return
 
-            self.workload_registry.set_placement(workload_id, decision)
-            self.workload_registry.update_state(workload_id, WorkloadState.PLACED)
-            if attempt_id:
-                self.attempt_registry.mark_assigned(attempt_id, decision.selected_worker_id)
+                self.workload_registry.set_placement(workload_id, decision)
+                self.workload_registry.set_placement_explanation(workload_id, {})
+                self.workload_registry.update_state(workload_id, WorkloadState.PLACED)
+                if self.attempt_registry is not None:
+                    attempt = self.attempt_registry.create_attempt(workload_id)
+                    attempt_id = attempt.attempt_id
+                if attempt_id:
+                    self.attempt_registry.mark_assigned(attempt_id, decision.selected_worker_id)
 
             logger.info(f"Workload {workload_id} placed on {decision.selected_worker_id} (attempt {attempts_used})")
 
@@ -223,7 +495,7 @@ class WorkloadOrchestrator:
                     self.attempt_registry.mark_running(attempt_id)
 
                 # Use http client (which defaults to httpx.AsyncClient or mock)
-                client = getattr(self, 'http_client', httpx.AsyncClient())
+                client = getattr(self, "http_client", None) or httpx.AsyncClient()
                 url = f"{worker_info.endpoint_url}/api/v1/workloads/execute"
 
                 resp = await client.post(url, json=spec.model_dump(mode='json'), timeout=60.0)
@@ -261,7 +533,10 @@ class WorkloadOrchestrator:
                         spec.input_asset_hashes.add(result.checkpoint_hash)
                         spec.parameters["resume_from_checkpoint"] = result.checkpoint_hash
 
-                    asyncio.create_task(self._process_workload(workload_id))
+                    self.workload_registry.set_placement(workload_id, None)
+                    self.workload_registry.set_placement_explanation(workload_id, {})
+                    self.workload_registry.update_state(workload_id, WorkloadState.SUBMITTED)
+                    self.enqueue_workload(workload_id)
                     return
 
                 if result.success:
@@ -387,7 +662,7 @@ class WorkloadOrchestrator:
         if not worker_info:
             return
             
-        client = getattr(self, 'http_client', httpx.AsyncClient())
+        client = getattr(self, "http_client", None) or httpx.AsyncClient()
         url = f"{worker_info.endpoint_url}/api/v1/workloads"
         
         for wid in active_workloads:
@@ -397,4 +672,3 @@ class WorkloadOrchestrator:
                 await client.post(f"{url}/{wid}/checkpoint", timeout=10.0)
             except Exception as e:
                 logger.error(f"Failed to trigger checkpoint for {wid} on {worker_id}: {e}")
-

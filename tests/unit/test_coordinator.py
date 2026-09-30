@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from aidars.distributed.coordinator import CoordinatorService
+from aidars.distributed.auth import CredentialStore
 from aidars.distributed.models import (
     HeartbeatPayload,
     LocateAssetsRequest,
@@ -18,6 +19,7 @@ from aidars.distributed.models import (
     WorkerMetrics,
     WorkerRegistrationPayload,
     WorkerStatus,
+    WorkloadSpec,
 )
 from aidars.distributed.prioritizer import CandidatePrioritizer, LatencyTracker
 from aidars.distributed.registry import WorkerHealthStatus, WorkerRegistry
@@ -85,6 +87,27 @@ def test_register_worker_endpoint(client: TestClient, coordinator_service: Coord
     assert worker.ip_address == "192.168.1.100"
     assert coordinator_service.registry.get_workers_for_hash(HASH_1) == {"node-alpha"}
 
+
+def test_workload_status_exposes_additive_m11_explanation_and_queue_fields():
+    service = CoordinatorService(credential_store=CredentialStore(admin_tokens={"test-admin"}))
+    record = service.workload_registry.add_workload(WorkloadSpec(
+        workload_id="explain-me", task_type="generic", priority=75,
+        deadline_at_utc=time.time() + 100,
+    ))
+    record.placement_explanation = {"eligible_worker_ids": [], "candidates": [
+        {"worker_id": "w-1", "eligible": False, "rejection_reasons": ["INSUFFICIENT_CPU"]}
+    ]}
+    service.workload_registry.set_placement_explanation(record.spec.workload_id, record.placement_explanation)
+    print("BEFORE API:", service.workload_registry.get_workload("explain-me").placement_explanation)
+    with TestClient(service.app) as client:
+        response = client.get("/api/v1/workloads/explain-me", headers={"Authorization": "Bearer test-admin"})
+    assert response.status_code == 200
+    body = response.json()
+    print("RAW RESPONSE:", body)
+    assert body["placement_explanation"]["candidates"][0]["rejection_reasons"] == ["INSUFFICIENT_CPU"]
+    assert body["scheduling"]["priority"] == 75
+    assert body["scheduling"]["deadline_state"] in ("future", "approaching")
+    assert body["queue"][0]["queue_position"] == 1
 
 def test_register_worker_invalid_payload(client: TestClient):
     # Invalid IP address

@@ -48,6 +48,9 @@ class WorkerResourceMonitor:
 
         gpu_available = False
         gpu_name = None
+        gpu_vendor = None
+        gpu_compute_capability = None
+        gpu_driver_version = None
         vram_total = 0
         vram_avail = 0
 
@@ -58,6 +61,19 @@ class WorkerResourceMonitor:
                 gpu_name = pynvml.nvmlDeviceGetName(handle)
                 if isinstance(gpu_name, bytes):
                     gpu_name = gpu_name.decode("utf-8")
+                gpu_vendor = "NVIDIA"
+                try:
+                    major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
+                    gpu_compute_capability = float(f"{major}.{minor}")
+                except Exception:
+                    # NVML/driver versions differ; unknown remains unknown.
+                    pass
+                try:
+                    gpu_driver_version = pynvml.nvmlSystemGetDriverVersion()
+                    if isinstance(gpu_driver_version, bytes):
+                        gpu_driver_version = gpu_driver_version.decode("utf-8")
+                except Exception:
+                    pass
                 
                 info = pynvml.nvmlDeviceGetMemoryInfo(handle)
                 vram_total = info.total
@@ -77,6 +93,10 @@ class WorkerResourceMonitor:
             ram_available_bytes=ram_avail,
             gpu_available=gpu_available,
             gpu_device_name=gpu_name,
+            gpu_vendor=gpu_vendor,
+            gpu_model=gpu_name,
+            gpu_compute_capability=gpu_compute_capability,
+            gpu_driver_version=gpu_driver_version,
             vram_total_bytes=vram_total,
             vram_available_bytes=vram_avail,
             active_workload_count=active_workload_count,
