@@ -118,9 +118,11 @@ class ExecutionManager:
             self.active_runtimes.pop(workload_id, None)
             
         duration = time.time() - start_time
+        was_checkpointed = getattr(runtime, "_checkpoint_requested", False)
 
         # 4. Ingest Outputs to CAS
         output_hashes: Set[str] = set()
+        output_sizes: Dict[str, int] = {}
         if success:
             try:
                 for root, _, files in os.walk(outputs_dir):
@@ -128,11 +130,12 @@ class ExecutionManager:
                         filepath = os.path.join(root, filename)
                         with open(filepath, "rb") as f:
                             data = f.read()
-                        
+
                         # Use CAS staging for atomic commit and hashing
                         try:
                             h = self.cas.store_bytes(data)
                             output_hashes.add(h)
+                            output_sizes[h] = len(data)
                         except Exception as e:
                             logger.error(f"Failed to store {filename}: {e}")
                             raise e
@@ -140,19 +143,37 @@ class ExecutionManager:
                 success = False
                 stderr_snip = (stderr_snip or "") + f"\nOutput ingestion failed: {exc}"
 
+        # 4b. Output verification (M8.6): a successful process exit does not
+        # by itself mean the workload produced its expected output -- e.g. a
+        # renderer that exits 0 having written nothing. An adapter may
+        # declare a minimum expected output-file count via
+        # spec.parameters["expected_output_count"] (BlenderAdapter sets this
+        # to the chunk's frame count). When the key is absent, no minimum is
+        # enforced and behavior is unchanged from before this check existed
+        # -- this keeps the change additive/opt-in for every existing caller
+        # and test that never set it. A checkpointed execution is exempt: it
+        # isn't expected to have produced final outputs yet.
+        if success and not was_checkpointed:
+            expected_output_count = spec.parameters.get("expected_output_count")
+            if expected_output_count is not None and len(output_hashes) < expected_output_count:
+                success = False
+                stderr_snip = (stderr_snip or "") + (
+                    f"\nOutput verification failed: expected at least "
+                    f"{expected_output_count} output file(s), found {len(output_hashes)}."
+                )
+
         # 5. Cleanup
         try:
             shutil.rmtree(workdir, ignore_errors=True)
         except Exception as e:
             logger.warning(f"Failed to cleanup workdir {workdir}: {e}")
 
-        was_checkpointed = getattr(runtime, "_checkpoint_requested", False)
-        
         return WorkloadExecutionResult(
             workload_id=workload_id,
             worker_id=worker_id,
             success=success or was_checkpointed,
             output_asset_hashes=output_hashes,
+            output_asset_sizes=output_sizes,
             execution_duration_seconds=duration,
             error_message=None if (success or was_checkpointed) else "Execution failed",
             stdout_snippet=stdout_snip,

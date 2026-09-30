@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from aidars.distributed.models import (
     CandidateSource,
@@ -33,6 +34,8 @@ from aidars.distributed.models import (
 )
 from aidars.m7.telemetry import TelemetryMemory, TelemetryIngestor
 from aidars.m7.controller import M7OrchestratorBridge
+from aidars.distributed.artifact import ArtifactRegistry
+from aidars.distributed.job_registry import CompletionPolicy, JobRegistry
 from aidars.distributed.prioritizer import CandidatePrioritizer, LatencyTracker
 from aidars.distributed.registry import ClusterStats, WorkerRegistry
 from aidars.distributed.state_store import CoordinatorStateStore
@@ -44,6 +47,17 @@ from aidars.distributed.workload_registry import (
 from aidars.distributed.workload import WorkloadOrchestrator
 
 logger = logging.getLogger(__name__)
+
+
+class JobSubmitRequest(BaseModel):
+    """M8: request body for POST /api/v1/jobs/submit. Lives here rather
+    than models.py to avoid a circular import (models.py <- job_registry.py
+    <- workload_registry.py <- models.py would cycle if CompletionPolicy
+    were imported into models.py directly)."""
+
+    specs: List[WorkloadSpec]
+    completion_policy: CompletionPolicy = CompletionPolicy.ALL_REQUIRED
+    threshold: Optional[int] = None
 
 
 class CoordinatorService:
@@ -80,17 +94,25 @@ class CoordinatorService:
             state_store=state_store,
         )
         self.workload_registry = WorkloadRegistry(state_store=state_store)
-        
+
+        # M8: Job/Artifact registries. Same optional-state_store pattern as
+        # the registries above -- None (the default) means pure in-memory,
+        # no SQLite dependency.
+        self.job_registry = JobRegistry(self.workload_registry, state_store=state_store)
+        self.artifact_registry = ArtifactRegistry(state_store=state_store)
+
         # M7 Intelligence Initialization
         self.m7_memory = TelemetryMemory()
         self.m7_ingestor = TelemetryIngestor(self.m7_memory)
         self.m7_bridge = M7OrchestratorBridge(self.m7_memory)
-        
+
         self.orchestrator = WorkloadOrchestrator(
-            self.registry, 
-            self.workload_registry, 
+            self.registry,
+            self.workload_registry,
             m7_bridge=self.m7_bridge,
-            m7_ingestor=self.m7_ingestor
+            m7_ingestor=self.m7_ingestor,
+            job_registry=self.job_registry,
+            artifact_registry=self.artifact_registry,
         )
 
         self._start_time_utc = time.time()
@@ -170,6 +192,18 @@ class CoordinatorService:
         UNKNOWN execution outcome when the coordinator went down, so its
         workload_id is returned for re-drive by _redrive_recovered_workloads.
 
+        M8.10 Job/Artifact recovery: Jobs are restored BEFORE workloads
+        (JobRegistry.restore_job() just inserts durable identity/
+        membership/policy -- it doesn't need the workloads to exist yet).
+        Artifacts are restored after, order-independent either way since
+        ArtifactRegistry doesn't read WorkloadRegistry/JobRegistry.
+        "Reconstruct Job aggregate" from the PRD's recovery flow requires
+        no explicit code here: JobAggregate is never stored, only derived
+        (JobRegistry.get_aggregate()), so the instant both a Job's
+        membership and its member WorkloadRecords are restored, its
+        aggregate is already correct on the next read -- there is no
+        separate reconstruction step that could disagree with reality.
+
         Returns the list of workload_ids that need re-driving. Re-driving
         itself is deferred to a separate call so the caller can start the
         normal background loops first, per the phase's specified startup
@@ -199,6 +233,15 @@ class CoordinatorService:
                 self.coordinator_id, len(restored_workers),
             )
 
+        restored_jobs = self.state_store.load_jobs()
+        for job in restored_jobs:
+            self.job_registry.restore_job(job)
+        if restored_jobs:
+            logger.info(
+                "Coordinator %s restored %d job(s) from persisted state.",
+                self.coordinator_id, len(restored_jobs),
+            )
+
         restored_workloads = self.state_store.load_workloads()
         pending_redrive: List[str] = []
         for record in restored_workloads:
@@ -209,6 +252,15 @@ class CoordinatorService:
             logger.info(
                 "Coordinator %s restored %d workload(s) from persisted state (%d non-terminal, pending re-drive).",
                 self.coordinator_id, len(restored_workloads), len(pending_redrive),
+            )
+
+        restored_artifacts = self.state_store.load_artifacts()
+        for artifact in restored_artifacts:
+            self.artifact_registry.restore_artifact(artifact)
+        if restored_artifacts:
+            logger.info(
+                "Coordinator %s restored %d artifact(s) from persisted state.",
+                self.coordinator_id, len(restored_artifacts),
             )
 
         return pending_redrive
@@ -685,8 +737,49 @@ class CoordinatorService:
                 resp["placement"] = record.placement_decision.model_dump()
             if record.execution_result:
                 resp["result"] = record.execution_result.model_dump()
-                
+
             return resp
+
+        # --- Jobs (M8) ---
+        @router.post(
+            "/jobs/submit",
+            response_model=Dict[str, str],
+            status_code=status.HTTP_202_ACCEPTED,
+            summary="Submit a Job (a durable grouping of one or more workloads)",
+        )
+        async def submit_job(req: JobSubmitRequest) -> Dict[str, str]:
+            job_id = await self.orchestrator.submit_job(
+                req.specs, completion_policy=req.completion_policy, threshold=req.threshold,
+            )
+            return {"job_id": job_id, "status": "submitted"}
+
+        @router.get(
+            "/jobs/{job_id}",
+            status_code=status.HTTP_200_OK,
+            summary="Get Job status (derived aggregate over its member workloads)",
+        )
+        async def get_job_status(job_id: str) -> Dict[str, Any]:
+            job = self.job_registry.get_job(job_id)
+            if not job:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Job '{job_id}' not found.",
+                )
+            aggregate = self.job_registry.get_aggregate(job_id)
+            return {
+                "job_id": job_id,
+                "workload_ids": sorted(job.workload_ids),
+                "completion_policy": job.completion_policy.value,
+                "threshold": job.threshold,
+                "created_at": job.created_at,
+                "state": aggregate.state.value,
+                "total": aggregate.total,
+                "completed": aggregate.completed,
+                "failed": aggregate.failed,
+                "pending": aggregate.pending,
+                "running": aggregate.running,
+                "output_asset_hashes": sorted(aggregate.output_asset_hashes),
+            }
 
         app.include_router(router)
         return app

@@ -1,4 +1,4 @@
-import hashlib
+import uuid
 from typing import Any, List, Dict, Optional
 from aidars.adapters.base import ApplicationAdapter
 from aidars.distributed.models import WorkloadSpec
@@ -61,10 +61,23 @@ class BlenderAdapter(ApplicationAdapter):
 
         min_vram_bytes = 4 * 1024 * 1024 * 1024 if requires_gpu else 0
 
+        # M8.1/workload-identity: one job_id per evaluate_request() call,
+        # shared across every chunk it returns, and used as the workload_id
+        # prefix. Previously workload_id was
+        # md5(input_path + chunk.frame_start + chunk.frame_end), which
+        # collides on any second, independently-submitted request for the
+        # same file and frame range (e.g. resubmitting a render). A fresh
+        # UUID per call is collision-resistant and, as a bonus, gives
+        # evaluate_request()'s multi-chunk return value the first-class
+        # grouping identity it never had: submit_job() (WorkloadOrchestrator)
+        # reuses this job_id rather than minting a conflicting new one.
+        job_id = f"job-{uuid.uuid4().hex[:16]}"
+
         specs = []
         for idx, chunk in enumerate(plan.chunks):
             spec = WorkloadSpec(
-                workload_id=f"blender-render-{hashlib.md5(f'{input_path}-{chunk.frame_start}-{chunk.frame_end}'.encode()).hexdigest()[:8]}",
+                workload_id=f"{job_id}-chunk-{idx}",
+                job_id=job_id,
                 task_type="blender_render",
                 input_asset_hashes=input_asset_hashes,
                 min_cpu_cores=4,
@@ -76,7 +89,14 @@ class BlenderAdapter(ApplicationAdapter):
                     "input_path": input_path,
                     "frame_start": chunk.frame_start,
                     "frame_end": chunk.frame_end,
-                    "chunk_index": idx
+                    "chunk_index": idx,
+                    # M8.6: one output file expected per frame in this chunk.
+                    "expected_output_count": chunk.frame_count,
+                    # M8.7: the job's overall requested range, so a
+                    # frame-coverage check can be done per-chunk without
+                    # needing the original request dict.
+                    "job_frame_start": frame_start,
+                    "job_frame_end": frame_end,
                 }
             )
             specs.append(spec)

@@ -14,12 +14,19 @@ job/M8 concerns are later, separately-scoped phases.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import List, Optional, Union
 
+from aidars.distributed.artifact import (
+    Artifact,
+    ArtifactLifecycleState,
+    ArtifactVerificationState,
+)
+from aidars.distributed.job_registry import CompletionPolicy, JobRecord
 from aidars.distributed.models import (
     PlacementDecision,
     WorkerInfo,
@@ -97,6 +104,45 @@ class CoordinatorStateStore:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_workloads_state
                 ON workloads(state);
+            """)
+
+            # M8: Job identity/membership/completion-policy is durable;
+            # Job STATE is deliberately not a column here -- it is always
+            # derived from workloads at read time (see job_registry.py).
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS jobs (
+                    job_id TEXT PRIMARY KEY,
+                    workload_ids_json TEXT NOT NULL,
+                    completion_policy TEXT NOT NULL,
+                    threshold INTEGER,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+            """)
+
+            # M8.8/M8.9: Artifact provenance + lifecycle metadata only --
+            # never a second copy of the CAS bytes or a second hash scheme.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL,
+                    producer_workload_id TEXT NOT NULL,
+                    producer_job_id TEXT,
+                    created_at REAL NOT NULL,
+                    verification_state TEXT NOT NULL,
+                    lifecycle_state TEXT NOT NULL,
+                    storage_location TEXT NOT NULL,
+                    size_bytes INTEGER,
+                    updated_at REAL NOT NULL
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_artifacts_content_hash
+                ON artifacts(content_hash);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_artifacts_producer_job
+                ON artifacts(producer_job_id);
             """)
             self._conn.commit()
 
@@ -216,3 +262,118 @@ class CoordinatorStateStore:
             else None
         )
         return record
+
+    # ------------------------------------------------------------------ #
+    # Jobs (M8)
+    # ------------------------------------------------------------------ #
+
+    def save_job(self, record: JobRecord) -> None:
+        """Insert or update the persisted record for a Job. Only durable
+        identity/membership/policy fields are written -- Job state is
+        never persisted (see module/class docstrings)."""
+        with self._lock:
+            if self._conn is None:
+                return
+            now = time.time()
+            self._conn.execute("""
+                INSERT INTO jobs (
+                    job_id, workload_ids_json, completion_policy, threshold,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    workload_ids_json = excluded.workload_ids_json,
+                    completion_policy = excluded.completion_policy,
+                    threshold = excluded.threshold,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at;
+            """, (
+                record.job_id,
+                json.dumps(sorted(record.workload_ids)),
+                record.completion_policy.value,
+                record.threshold,
+                record.created_at,
+                now,
+            ))
+            self._conn.commit()
+
+    def load_jobs(self) -> List[JobRecord]:
+        """Load every persisted Job as a fully-reconstructed JobRecord."""
+        with self._lock:
+            if self._conn is None:
+                return []
+            rows = self._conn.execute("SELECT * FROM jobs").fetchall()
+            return [self._row_to_job_record(row) for row in rows]
+
+    @staticmethod
+    def _row_to_job_record(row: sqlite3.Row) -> JobRecord:
+        workload_ids = set(json.loads(row["workload_ids_json"]))
+        record = JobRecord(
+            job_id=row["job_id"],
+            workload_ids=workload_ids,
+            completion_policy=CompletionPolicy(row["completion_policy"]),
+            threshold=row["threshold"],
+        )
+        record.created_at = row["created_at"]
+        return record
+
+    # ------------------------------------------------------------------ #
+    # Artifacts (M8.8/M8.9)
+    # ------------------------------------------------------------------ #
+
+    def save_artifact(self, artifact: Artifact) -> None:
+        """Insert or update the persisted record for an Artifact."""
+        with self._lock:
+            if self._conn is None:
+                return
+            now = time.time()
+            self._conn.execute("""
+                INSERT INTO artifacts (
+                    artifact_id, content_hash, producer_workload_id,
+                    producer_job_id, created_at, verification_state,
+                    lifecycle_state, storage_location, size_bytes, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(artifact_id) DO UPDATE SET
+                    content_hash = excluded.content_hash,
+                    producer_workload_id = excluded.producer_workload_id,
+                    producer_job_id = excluded.producer_job_id,
+                    created_at = excluded.created_at,
+                    verification_state = excluded.verification_state,
+                    lifecycle_state = excluded.lifecycle_state,
+                    storage_location = excluded.storage_location,
+                    size_bytes = excluded.size_bytes,
+                    updated_at = excluded.updated_at;
+            """, (
+                artifact.artifact_id,
+                artifact.content_hash,
+                artifact.producer_workload_id,
+                artifact.producer_job_id,
+                artifact.created_at,
+                artifact.verification_state.value,
+                artifact.lifecycle_state.value,
+                artifact.storage_location,
+                artifact.size_bytes,
+                now,
+            ))
+            self._conn.commit()
+
+    def load_artifacts(self) -> List[Artifact]:
+        """Load every persisted Artifact."""
+        with self._lock:
+            if self._conn is None:
+                return []
+            rows = self._conn.execute("SELECT * FROM artifacts").fetchall()
+            return [self._row_to_artifact(row) for row in rows]
+
+    @staticmethod
+    def _row_to_artifact(row: sqlite3.Row) -> Artifact:
+        return Artifact(
+            artifact_id=row["artifact_id"],
+            content_hash=row["content_hash"],
+            producer_workload_id=row["producer_workload_id"],
+            producer_job_id=row["producer_job_id"],
+            created_at=row["created_at"],
+            verification_state=ArtifactVerificationState(row["verification_state"]),
+            lifecycle_state=ArtifactLifecycleState(row["lifecycle_state"]),
+            storage_location=row["storage_location"],
+            size_bytes=row["size_bytes"],
+        )

@@ -588,6 +588,14 @@ class WorkloadSpec(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     workload_id: str = Field(..., min_length=1, max_length=128)
+    job_id: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="M8: the Job this workload belongs to, if any. First-class field "
+                    "(not hidden inside parameters) so it survives persistence/recovery "
+                    "without adapter-specific convention. None for a standalone workload "
+                    "submitted outside any Job.",
+    )
     task_type: str = Field(..., min_length=1, max_length=64)  # e.g., "compute", "simulation", "render", "analysis"
     input_asset_hashes: Set[str] = Field(default_factory=set)
 
@@ -657,7 +665,15 @@ class WorkloadExecutionResult(BaseModel):
     workload_id: str
     worker_id: str
     success: bool
-    output_asset_hashes: Set[str]  # Verified SHA-256 artifacts committed to CAS
+    output_asset_hashes: Set[str]  # SHA-256 artifacts committed to CAS
+    output_asset_sizes: Dict[str, int] = Field(
+        default_factory=dict,
+        description="M8.8: byte size per output_asset_hashes entry, keyed by hash. "
+                     "Populated by the worker at ingestion time (already reading the "
+                     "bytes to hash them, so the size is free) for the Artifact model's "
+                     "size field. Optional/additive -- absent or missing keys mean size "
+                     "is simply unknown for that hash, not an error.",
+    )
     execution_duration_seconds: float
     error_message: Optional[str] = None
     stdout_snippet: Optional[str] = None

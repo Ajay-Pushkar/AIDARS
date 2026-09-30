@@ -5,9 +5,12 @@ Ties together models, placement, and registry to drive a workload from SUBMITTED
 
 import asyncio
 import logging
+import uuid
 import httpx
-from typing import List
+from typing import List, Optional, Set
 
+from aidars.distributed.artifact import ArtifactRegistry
+from aidars.distributed.job_registry import CompletionPolicy, JobRegistry
 from aidars.distributed.models import WorkloadSpec, WorkloadExecutionResult
 from aidars.distributed.placement import PlacementEngine
 from aidars.distributed.registry import WorkerRegistry
@@ -19,20 +22,80 @@ logger = logging.getLogger(__name__)
 class WorkloadOrchestrator:
     """Central orchestrator for workload lifecycle on the Coordinator."""
 
-    def __init__(self, registry: WorkerRegistry, workload_registry: WorkloadRegistry, m7_bridge=None, m7_ingestor=None) -> None:
+    def __init__(
+        self,
+        registry: WorkerRegistry,
+        workload_registry: WorkloadRegistry,
+        m7_bridge=None,
+        m7_ingestor=None,
+        job_registry: Optional[JobRegistry] = None,
+        artifact_registry: Optional[ArtifactRegistry] = None,
+    ) -> None:
         self.registry = registry
         self.workload_registry = workload_registry
         self.m7_ingestor = m7_ingestor
         self.placement_engine = PlacementEngine(m7_bridge=m7_bridge)
 
+        # M8: optional -- lazily constructed on first use by submit_job()
+        # if not injected, so every existing caller/test that only ever
+        # calls submit_workload() sees zero behavior change and doesn't
+        # need to know these exist.
+        self.job_registry = job_registry
+        self.artifact_registry = artifact_registry
+
     async def submit_workload(self, spec: WorkloadSpec) -> str:
         """Submit a new workload for execution. Returns the workload_id."""
         record = self.workload_registry.add_workload(spec)
-        
+
         # Asynchronously process the placement and execution
         asyncio.create_task(self._process_workload(spec.workload_id))
-        
+
         return spec.workload_id
+
+    async def submit_job(
+        self,
+        specs: List[WorkloadSpec],
+        completion_policy: CompletionPolicy = CompletionPolicy.ALL_REQUIRED,
+        threshold: Optional[int] = None,
+    ) -> str:
+        """Submit a Job: a durable grouping of one or more WorkloadSpecs.
+
+        CRITICAL (M8.1/M8.2): this delegates every spec through the
+        existing, unmodified submit_workload() path -- it is not a second
+        scheduler/dispatcher, just a membership-recording wrapper around
+        the same per-workload submission every caller already uses.
+
+        If every spec already carries the same job_id (e.g. set by
+        BlenderAdapter.evaluate_request(), which mints one job_id shared
+        across all chunks of one request), that id is reused rather than
+        minting a conflicting new one. If no spec carries a job_id, a
+        fresh one is minted and stamped onto copies of the specs (the
+        caller's original spec objects are never mutated in place).
+        """
+        if not specs:
+            raise ValueError("submit_job() requires at least one WorkloadSpec")
+
+        job_ids_present: Set[str] = {s.job_id for s in specs if s.job_id}
+        if len(job_ids_present) > 1:
+            raise ValueError(
+                f"submit_job() specs must share a single job_id or have none set; found {job_ids_present}"
+            )
+        job_id = job_ids_present.pop() if job_ids_present else f"job-{uuid.uuid4().hex[:16]}"
+
+        stamped_specs = [
+            spec if spec.job_id == job_id else spec.model_copy(update={"job_id": job_id})
+            for spec in specs
+        ]
+        workload_ids = {s.workload_id for s in stamped_specs}
+
+        if self.job_registry is None:
+            self.job_registry = JobRegistry(self.workload_registry)
+        self.job_registry.create_job(job_id, workload_ids, completion_policy=completion_policy, threshold=threshold)
+
+        for spec in stamped_specs:
+            await self.submit_workload(spec)
+
+        return job_id
 
     async def _process_workload(self, workload_id: str) -> None:
         """Drive the workload through its lifecycle phases."""
@@ -114,6 +177,7 @@ class WorkloadOrchestrator:
                 elif result.success:
                     self.workload_registry.set_result(workload_id, result)
                     self.workload_registry.update_state(workload_id, WorkloadState.COMPLETED)
+                    self._record_artifacts(spec, result)
                 else:
                     self.workload_registry.set_result(workload_id, result)
                     self.workload_registry.update_state(workload_id, WorkloadState.FAILED, error_message=result.error_message)
@@ -149,6 +213,8 @@ class WorkloadOrchestrator:
                                     WorkloadState.COMPLETED if result.success else WorkloadState.FAILED,
                                     error_message=None if result.success else result.error_message
                                 )
+                                if result.success:
+                                    self._record_artifacts(spec, result)
                                 if self.m7_ingestor:
                                     self.m7_ingestor.on_workload_completed(
                                         workload_type=spec.task_type,
@@ -160,6 +226,22 @@ class WorkloadOrchestrator:
                             except Exception as e2:
                                 logger.error(f"Fallback Exception: {e2!r}")
                                 self.workload_registry.update_state(workload_id, WorkloadState.FAILED, error_message=str(e2))
+
+    def _record_artifacts(self, spec: WorkloadSpec, result: WorkloadExecutionResult) -> None:
+        """M8.5 tail / M8.8: after a COMPLETED result is persisted via
+        set_result() (the existing, unmodified result-persistence path),
+        record one Artifact per output hash. This extends that path's
+        consumers -- it does not replace or duplicate it. No-op if
+        artifact_registry isn't configured or there's nothing to record,
+        so callers/tests that never touch M8 see no behavior change."""
+        if self.artifact_registry is None or not result.output_asset_hashes:
+            return
+        self.artifact_registry.record_artifacts(
+            producer_workload_id=spec.workload_id,
+            producer_job_id=spec.job_id,
+            content_hashes=result.output_asset_hashes,
+            sizes=result.output_asset_sizes,
+        )
 
     async def drain_worker(self, worker_id: str) -> None:
         """Trigger migration for all executing workloads on a specific worker."""
