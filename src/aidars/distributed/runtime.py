@@ -11,7 +11,21 @@ from aidars.distributed.models import WorkloadSpec
 
 
 class RuntimeAdapter(abc.ABC):
-    """Abstract base class for workload execution runtimes."""
+    """Abstract base class for workload execution runtimes.
+
+    M10.7: supports_checkpointing is an explicit, honest capability flag.
+    A subclass MUST NOT override it to True unless checkpoint() actually
+    preserves enough state to make a later resume semantically correct --
+    the default (False) means "this runtime cannot safely checkpoint",
+    and ExecutionManager.execute_workload() trusts that declaration
+    rather than assuming universal support. Requesting a checkpoint from
+    a runtime that doesn't support it still aborts the run (checkpoint()
+    is always safe to call), but is surfaced as a genuine, retryable
+    FAILED attempt rather than a fabricated successful migration -- see
+    execution.py.
+    """
+
+    supports_checkpointing: bool = False
 
     @abc.abstractmethod
     async def execute(
@@ -33,8 +47,17 @@ class RuntimeAdapter(abc.ABC):
 
 
 class GenericSubprocessRuntime(RuntimeAdapter):
-    """A generic runtime that executes a script or command."""
-    
+    """A generic runtime that executes a script or command.
+
+    supports_checkpointing is explicitly False: checkpoint() below only
+    terminates the subprocess -- it does not preserve any process state
+    (memory, open files, partial output) that a resume could use. Prior
+    to M10 this was silently treated as a successful checkpoint anyway;
+    that was dishonest and is now corrected (see execution.py).
+    """
+
+    supports_checkpointing: bool = False
+
     def __init__(self):
         self._process: Optional[asyncio.subprocess.Process] = None
         self._checkpoint_requested: bool = False

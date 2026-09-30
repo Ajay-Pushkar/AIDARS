@@ -10,10 +10,11 @@ import logging
 import os
 import shutil
 import time
-from typing import Dict, Set
+from typing import Dict, Optional, Set
 
 from aidars.distributed.cas_adapter import LocalCASAdapter
-from aidars.distributed.models import WorkloadExecutionResult, WorkloadSpec
+from aidars.distributed.checkpoint import CURRENT_CHECKPOINT_FORMAT_VERSION
+from aidars.distributed.models import FailureCategory, WorkloadExecutionResult, WorkloadSpec
 from aidars.distributed.runtime import RuntimeAdapter
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ class ExecutionManager:
                 output_asset_hashes=set(),
                 execution_duration_seconds=0.0,
                 error_message=f"Failed to create workspace: {exc}",
+                failure_category=FailureCategory.RESOURCE_EXHAUSTION,
             )
 
         # Write metadata
@@ -62,6 +64,7 @@ class ExecutionManager:
 
         # 2. Stage Dependencies
         # (This assumes the coordinator/client has already fetched missing hashes to CAS)
+        staging_start = time.time()
         missing_local = []
         for h in spec.input_asset_hashes:
             if not self.cas.has_asset(h):
@@ -83,9 +86,11 @@ class ExecutionManager:
                         success=False,
                         output_asset_hashes=set(),
                         execution_duration_seconds=0.0,
+                        staging_duration_seconds=time.time() - staging_start,
                         error_message=f"Failed to stage dependency {h}: {exc}",
+                        failure_category=FailureCategory.TEMPORARY_CAS_FAILURE,
                     )
-        
+
         if missing_local:
             return WorkloadExecutionResult(
                 workload_id=workload_id,
@@ -93,15 +98,23 @@ class ExecutionManager:
                 success=False,
                 output_asset_hashes=set(),
                 execution_duration_seconds=0.0,
+                staging_duration_seconds=time.time() - staging_start,
                 error_message=f"Missing dependencies locally: {missing_local}",
+                # Treated as a sync-timing issue (dependencies not yet
+                # propagated to this worker's CAS) rather than a genuinely
+                # invalid dependency reference -- retryable.
+                failure_category=FailureCategory.TEMPORARY_CAS_FAILURE,
             )
+        staging_duration = time.time() - staging_start
 
         # 3. Execute with Timeout
         timeout_seconds = spec.estimated_duration_seconds * 3.0
         start_time = time.time()
-        
+
         self.active_runtimes[workload_id] = runtime
-        
+
+        timed_out = False
+        runtime_exception: Optional[BaseException] = None
         try:
             success, stdout_snip, stderr_snip = await asyncio.wait_for(
                 runtime.execute(spec, workdir), timeout=timeout_seconds
@@ -110,19 +123,42 @@ class ExecutionManager:
             success = False
             stdout_snip = None
             stderr_snip = f"Execution timed out after {timeout_seconds} seconds"
+            timed_out = True
         except Exception as exc:
             success = False
             stdout_snip = None
             stderr_snip = f"Runtime error: {exc}"
+            runtime_exception = exc
         finally:
             self.active_runtimes.pop(workload_id, None)
-            
+
         duration = time.time() - start_time
-        was_checkpointed = getattr(runtime, "_checkpoint_requested", False)
+        checkpoint_requested = getattr(runtime, "_checkpoint_requested", False)
+        runtime_supports_checkpointing = getattr(runtime, "supports_checkpointing", False)
+
+        # M10.7: a checkpoint is only honored as real when the runtime
+        # explicitly declares it can safely produce one. If checkpointing
+        # was requested (e.g. for draining) but the runtime doesn't
+        # support it, the abort is a genuine failure -- never a fabricated
+        # successful "migration" (the pre-M10 behavior here treated ANY
+        # checkpoint request as success regardless of runtime capability).
+        was_checkpointed = checkpoint_requested and runtime_supports_checkpointing
+        checkpoint_unsupported_abort = checkpoint_requested and not runtime_supports_checkpointing
+
+        if checkpoint_unsupported_abort:
+            success = False
+            stderr_snip = (stderr_snip or "") + (
+                "\nCheckpoint was requested but this runtime "
+                f"({type(runtime).__name__}) does not support checkpointing "
+                "(supports_checkpointing=False); execution was aborted and "
+                "must be retried as a fresh attempt rather than resumed."
+            )
 
         # 4. Ingest Outputs to CAS
         output_hashes: Set[str] = set()
         output_sizes: Dict[str, int] = {}
+        ingestion_start = time.time()
+        ingestion_failed = False
         if success:
             try:
                 for root, _, files in os.walk(outputs_dir):
@@ -141,7 +177,9 @@ class ExecutionManager:
                             raise e
             except Exception as exc:
                 success = False
+                ingestion_failed = True
                 stderr_snip = (stderr_snip or "") + f"\nOutput ingestion failed: {exc}"
+        output_ingestion_duration = time.time() - ingestion_start
 
         # 4b. Output verification (M8.6): a successful process exit does not
         # by itself mean the workload produced its expected output -- e.g. a
@@ -153,14 +191,39 @@ class ExecutionManager:
         # -- this keeps the change additive/opt-in for every existing caller
         # and test that never set it. A checkpointed execution is exempt: it
         # isn't expected to have produced final outputs yet.
+        verification_start = time.time()
+        verification_failed = False
         if success and not was_checkpointed:
             expected_output_count = spec.parameters.get("expected_output_count")
             if expected_output_count is not None and len(output_hashes) < expected_output_count:
                 success = False
+                verification_failed = True
                 stderr_snip = (stderr_snip or "") + (
                     f"\nOutput verification failed: expected at least "
                     f"{expected_output_count} output file(s), found {len(output_hashes)}."
                 )
+        verification_duration = time.time() - verification_start
+
+        # M10.5: classify the terminal outcome. Order matters -- more
+        # specific/earlier-detected causes take precedence over the
+        # generic non-zero-exit default.
+        failure_category: Optional[FailureCategory] = None
+        final_success = success or was_checkpointed
+        if not final_success:
+            if checkpoint_unsupported_abort:
+                failure_category = FailureCategory.WORKER_UNAVAILABLE
+            elif timed_out:
+                failure_category = FailureCategory.RESOURCE_EXHAUSTION
+            elif ingestion_failed:
+                failure_category = FailureCategory.TEMPORARY_CAS_FAILURE
+            elif verification_failed:
+                failure_category = FailureCategory.APPLICATION_ERROR
+            else:
+                # Generic runtime exception or non-zero exit: no better
+                # signal is available at this layer, so this is
+                # conservatively classified as an application-level
+                # failure (non-retryable) rather than assumed transient.
+                failure_category = FailureCategory.APPLICATION_ERROR
 
         # 5. Cleanup
         try:
@@ -171,15 +234,21 @@ class ExecutionManager:
         return WorkloadExecutionResult(
             workload_id=workload_id,
             worker_id=worker_id,
-            success=success or was_checkpointed,
+            success=final_success,
             output_asset_hashes=output_hashes,
             output_asset_sizes=output_sizes,
             execution_duration_seconds=duration,
-            error_message=None if (success or was_checkpointed) else "Execution failed",
+            staging_duration_seconds=staging_duration,
+            output_ingestion_duration_seconds=output_ingestion_duration,
+            verification_duration_seconds=verification_duration,
+            error_message=None if final_success else "Execution failed",
             stdout_snippet=stdout_snip,
             stderr_snippet=stderr_snip,
             was_checkpointed=was_checkpointed,
-            checkpoint_hash=next(iter(output_hashes)) if (was_checkpointed and output_hashes) else None
+            checkpoint_hash=next(iter(output_hashes)) if (was_checkpointed and output_hashes) else None,
+            checkpoint_runtime_type=type(runtime).__name__ if was_checkpointed else None,
+            checkpoint_format_version=CURRENT_CHECKPOINT_FORMAT_VERSION if was_checkpointed else None,
+            failure_category=failure_category,
         )
 
     async def checkpoint_workload(self, workload_id: str) -> bool:

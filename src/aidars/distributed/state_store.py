@@ -22,13 +22,22 @@ import time
 from pathlib import Path
 from typing import Callable, List, Optional, TypeVar, Union
 
+try:
+    import fcntl
+    _HAS_FCNTL = True
+except ImportError:  # pragma: no cover - fcntl is POSIX-only
+    fcntl = None  # type: ignore[assignment]
+    _HAS_FCNTL = False
+
 from aidars.distributed.artifact import (
     Artifact,
     ArtifactLifecycleState,
     ArtifactVerificationState,
 )
+from aidars.distributed.attempt import AttemptRecord, AttemptStatus
 from aidars.distributed.job_registry import CompletionPolicy, JobRecord
 from aidars.distributed.models import (
+    FailureCategory,
     PlacementDecision,
     WorkerInfo,
     WorkloadExecutionResult,
@@ -41,6 +50,29 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
+class CoordinatorAlreadyRunningError(RuntimeError):
+    """M10.15: raised when a second CoordinatorService process tries to
+    open the same SQLite state file another process already holds an
+    exclusive lock on.
+
+    This is NOT distributed consensus/HA -- it is the one concrete,
+    honest safety mechanism the M10 PRD asks for in lieu of real HA: a
+    single coordinator remains the only valid configuration for this
+    architecture (see docs/M10_ARCHITECTURE.md's HA readiness audit), so
+    accidentally starting a second one against the same state file must
+    fail loudly instead of silently corrupting or racing on shared
+    state.
+    """
+
+
+# Sidecar lock file suffix. Kept as a byte-identical companion path next
+# to the SQLite file itself rather than reusing SQLite's own locking,
+# because SQLite's own busy_timeout/WAL locking is designed to arbitrate
+# many short-lived transactions from the SAME process, not to detect "a
+# second whole coordinator process is running" at startup.
+_LOCK_FILE_SUFFIX = ".coordinator.lock"
+
+
 class CoordinatorStateStore:
     """SQLite-backed persistence for WorkerInfo and WorkloadRecord.
 
@@ -49,9 +81,13 @@ class CoordinatorStateStore:
     floating-point timestamp precision) via load_workers()/load_workloads().
     """
 
-    def __init__(self, db_path: Union[str, Path]) -> None:
+    def __init__(self, db_path: Union[str, Path], enforce_single_writer: bool = True) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._lock_fd = None
+        if enforce_single_writer and _HAS_FCNTL:
+            self._acquire_single_writer_lock()
 
         self._lock = threading.RLock()
         self._conn: Optional[sqlite3.Connection] = sqlite3.connect(
@@ -61,6 +97,29 @@ class CoordinatorStateStore:
         )
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
+
+    def _acquire_single_writer_lock(self) -> None:
+        """M10.15: exclusive, non-blocking advisory lock on a sidecar
+        file next to db_path. Fails FAST and LOUD (raises
+        CoordinatorAlreadyRunningError) rather than blocking, because a
+        second coordinator process starting up should be told
+        immediately, not hang waiting for the first one to exit.
+        """
+        lock_path = self.db_path.parent / (self.db_path.name + _LOCK_FILE_SUFFIX)
+        fd = open(lock_path, "w")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            fd.close()
+            raise CoordinatorAlreadyRunningError(
+                f"Another coordinator process already holds the lock for state "
+                f"file {self.db_path} (lock file: {lock_path}). Running two "
+                f"coordinators against the same SQLite state file is unsafe and "
+                f"not supported -- see docs/M10_ARCHITECTURE.md's HA readiness "
+                f"audit for why, and what a real multi-coordinator deployment "
+                f"would require."
+            ) from exc
+        self._lock_fd = fd
 
     def __del__(self) -> None:
         self.close()
@@ -103,9 +162,17 @@ class CoordinatorStateStore:
         return results
 
     def close(self) -> None:
-        if self._conn is not None:
+        if getattr(self, "_conn", None) is not None:
             self._conn.close()
             self._conn = None
+        lock_fd = getattr(self, "_lock_fd", None)
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            lock_fd.close()
+            self._lock_fd = None
 
     def _init_schema(self) -> None:
         """Initialize schema and configure WAL mode pragmas."""
@@ -185,6 +252,36 @@ class CoordinatorStateStore:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_artifacts_producer_job
                 ON artifacts(producer_job_id);
+            """)
+
+            # M10.1: one row per execution Attempt. workload_id is NOT the
+            # primary key (a workload has many attempts, numbered by
+            # attempt_number) -- see attempt.py's module docstring for the
+            # Job -> Workload -> Attempt -> ExecutionResult -> Artifact
+            # relationship this preserves across a coordinator restart.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    workload_id TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    worker_id TEXT,
+                    queued_at REAL NOT NULL,
+                    assigned_at REAL,
+                    started_at REAL,
+                    finished_at REAL,
+                    failure_category TEXT,
+                    failure_reason TEXT,
+                    execution_result_json TEXT,
+                    checkpoint_hash TEXT,
+                    checkpoint_runtime_type TEXT,
+                    checkpoint_format_version INTEGER,
+                    updated_at REAL NOT NULL
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_attempts_workload_id
+                ON attempts(workload_id);
             """)
             self._conn.commit()
 
@@ -430,4 +527,97 @@ class CoordinatorStateStore:
             lifecycle_state=ArtifactLifecycleState(row["lifecycle_state"]),
             storage_location=row["storage_location"],
             size_bytes=row["size_bytes"],
+        )
+
+    # ------------------------------------------------------------------ #
+    # Attempts (M10.1/M10.18)
+    # ------------------------------------------------------------------ #
+
+    def save_attempt(self, attempt: AttemptRecord) -> None:
+        """Insert or update the persisted record for an execution Attempt."""
+        with self._lock:
+            if self._conn is None:
+                return
+            now = time.time()
+            execution_result_json = (
+                attempt.execution_result.model_dump_json()
+                if attempt.execution_result is not None
+                else None
+            )
+            self._conn.execute("""
+                INSERT INTO attempts (
+                    attempt_id, workload_id, attempt_number, status, worker_id,
+                    queued_at, assigned_at, started_at, finished_at,
+                    failure_category, failure_reason, execution_result_json,
+                    checkpoint_hash, checkpoint_runtime_type, checkpoint_format_version,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(attempt_id) DO UPDATE SET
+                    status = excluded.status,
+                    worker_id = excluded.worker_id,
+                    assigned_at = excluded.assigned_at,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    failure_category = excluded.failure_category,
+                    failure_reason = excluded.failure_reason,
+                    execution_result_json = excluded.execution_result_json,
+                    checkpoint_hash = excluded.checkpoint_hash,
+                    checkpoint_runtime_type = excluded.checkpoint_runtime_type,
+                    checkpoint_format_version = excluded.checkpoint_format_version,
+                    updated_at = excluded.updated_at;
+            """, (
+                attempt.attempt_id,
+                attempt.workload_id,
+                attempt.attempt_number,
+                attempt.status.value,
+                attempt.worker_id,
+                attempt.queued_at,
+                attempt.assigned_at,
+                attempt.started_at,
+                attempt.finished_at,
+                attempt.failure_category.value if attempt.failure_category else None,
+                attempt.failure_reason,
+                execution_result_json,
+                attempt.checkpoint_hash,
+                attempt.checkpoint_runtime_type,
+                attempt.checkpoint_format_version,
+                now,
+            ))
+            self._conn.commit()
+
+    def load_attempts(self) -> List[AttemptRecord]:
+        """Load every persisted Attempt."""
+        with self._lock:
+            if self._conn is None:
+                return []
+            rows = self._conn.execute("SELECT * FROM attempts").fetchall()
+            return self._safe_reconstruct(
+                rows, self._row_to_attempt,
+                entity_name="attempt", pk_column="attempt_id",
+            )
+
+    @staticmethod
+    def _row_to_attempt(row: sqlite3.Row) -> AttemptRecord:
+        return AttemptRecord(
+            attempt_id=row["attempt_id"],
+            workload_id=row["workload_id"],
+            attempt_number=row["attempt_number"],
+            status=AttemptStatus(row["status"]),
+            worker_id=row["worker_id"],
+            queued_at=row["queued_at"],
+            assigned_at=row["assigned_at"],
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+            failure_category=(
+                FailureCategory(row["failure_category"]) if row["failure_category"] is not None else None
+            ),
+            failure_reason=row["failure_reason"],
+            execution_result=(
+                WorkloadExecutionResult.model_validate_json(row["execution_result_json"])
+                if row["execution_result_json"] is not None
+                else None
+            ),
+            checkpoint_hash=row["checkpoint_hash"],
+            checkpoint_runtime_type=row["checkpoint_runtime_type"],
+            checkpoint_format_version=row["checkpoint_format_version"],
         )

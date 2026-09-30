@@ -102,6 +102,39 @@ class LocalityTier(str, Enum):
     WAN = "wan"
 
 
+class FailureCategory(str, Enum):
+    """M10.5: explicit, intentional retry classification for a failed
+    execution attempt. Populated at the specific point in execution.py
+    (or workload.py, for dispatch-level failures the worker never saw)
+    where the failure actually occurred -- never inferred after the fact
+    from string matching. See retry.py for which categories are
+    retryable and retry.is_retryable()'s "unrecognized -> non-retryable"
+    default.
+
+    Retryable (environment/transient -- a new attempt has a genuine
+    chance of succeeding):
+      WORKER_UNAVAILABLE, TEMPORARY_CAS_FAILURE, RESOURCE_EXHAUSTION
+
+    Non-retryable (about the workload/request itself -- retrying without
+    changing anything will deterministically fail again):
+      INVALID_INPUT, INVALID_DEPENDENCY, MISSING_EXECUTABLE,
+      INVALID_WORKLOAD, APPLICATION_ERROR, AUTHORIZATION_FAILURE,
+      MALFORMED_REQUEST
+    """
+
+    WORKER_UNAVAILABLE = "worker_unavailable"
+    TEMPORARY_CAS_FAILURE = "temporary_cas_failure"
+    RESOURCE_EXHAUSTION = "resource_exhaustion"
+
+    INVALID_INPUT = "invalid_input"
+    INVALID_DEPENDENCY = "invalid_dependency"
+    MISSING_EXECUTABLE = "missing_executable"
+    INVALID_WORKLOAD = "invalid_workload"
+    APPLICATION_ERROR = "application_error"
+    AUTHORIZATION_FAILURE = "authorization_failure"
+    MALFORMED_REQUEST = "malformed_request"
+
+
 class TransferState(str, Enum):
     """State of an in-flight asset transfer."""
 
@@ -711,4 +744,40 @@ class WorkloadExecutionResult(BaseModel):
     stderr_snippet: Optional[str] = None
     was_checkpointed: bool = Field(default=False)
     checkpoint_hash: Optional[str] = None
+
+    # M10.5: explicit retry classification for a failed result. None for
+    # a successful result, or for a failure predating this field's
+    # introduction (backward-compatible: absent/None simply means
+    # "unclassified", not an error).
+    failure_category: Optional[FailureCategory] = Field(default=None)
+
+    # M10.7 checkpoint capability metadata -- only meaningful when
+    # was_checkpointed is True. checkpoint_runtime_type/format_version
+    # let checkpoint.py validate a checkpoint without a second identity
+    # scheme (content identity is still purely the CAS hash above).
+    checkpoint_runtime_type: Optional[str] = Field(default=None)
+    checkpoint_format_version: Optional[int] = Field(default=None)
+
+    # M10.11: execution observability timeline. staging = dependency
+    # staging into the sandbox (the asset-synchronization-equivalent
+    # phase for this in-process dispatch path -- see docs/M10_ARCHITECTURE.md
+    # for why a separate cross-worker asset-sync phase isn't separately
+    # instrumented here). execution_duration_seconds above already is,
+    # and remains, the pure runtime-execution phase duration (unchanged
+    # from pre-M10 behavior). output_ingestion = writing produced files
+    # into CAS. verification = the M8.6 expected-output-count check.
+    staging_duration_seconds: float = Field(default=0.0, ge=0.0)
+    output_ingestion_duration_seconds: float = Field(default=0.0, ge=0.0)
+    verification_duration_seconds: float = Field(default=0.0, ge=0.0)
+
+    @property
+    def total_duration_seconds(self) -> float:
+        """Sum of every measured phase -- lets a caller/test distinguish
+        which phase dominated without a second duplicated total field."""
+        return (
+            self.staging_duration_seconds
+            + self.execution_duration_seconds
+            + self.output_ingestion_duration_seconds
+            + self.verification_duration_seconds
+        )
 

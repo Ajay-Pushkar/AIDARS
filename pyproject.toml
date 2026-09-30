@@ -25,6 +25,8 @@ where = ["src"]
 
 [project.scripts]
 aidars-scene = "aidars.adapters.blender.intelligence.cli:main"
+aidars-coordinator = "aidars.distributed.cli:run_coordinator"
+aidars-worker = "aidars.distributed.cli:run_worker"
 
 [project.optional-dependencies]
 dev = [

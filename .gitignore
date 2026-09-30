@@ -28,3 +28,9 @@ output/
 .aidars_cache/
 .aidars_cas/
 *.tmp
+
+# M10: deployment secrets and local runtime data -- never commit a real
+# .env or the coordinator/worker's SQLite state / CAS / workload dirs.
+deploy/.env
+data/
+*.coordinator.lock

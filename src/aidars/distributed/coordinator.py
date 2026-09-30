@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, 
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
+from aidars.distributed.attempt import AttemptRegistry, AttemptStatus
 from aidars.distributed.auth import (
     CredentialStore,
     ReplayGuard,
@@ -29,6 +30,7 @@ from aidars.distributed.auth import (
 from aidars.distributed.models import (
     CandidateSource,
     ClusterTelemetry,
+    FailureCategory,
     HeartbeatPayload,
     HeartbeatResponse,
     LocateAssetsRequest,
@@ -146,6 +148,12 @@ class CoordinatorService:
         self.job_registry = JobRegistry(self.workload_registry, state_store=state_store)
         self.artifact_registry = ArtifactRegistry(state_store=state_store)
 
+        # M10.1: same optional-state_store pattern as the registries
+        # above -- always constructed (matching job_registry/
+        # artifact_registry's own always-on construction here), None
+        # state_store means pure in-memory, no SQLite dependency.
+        self.attempt_registry = AttemptRegistry(state_store=state_store)
+
         # M7 Intelligence Initialization
         self.m7_memory = TelemetryMemory()
         self.m7_ingestor = TelemetryIngestor(self.m7_memory)
@@ -158,6 +166,7 @@ class CoordinatorService:
             m7_ingestor=self.m7_ingestor,
             job_registry=self.job_registry,
             artifact_registry=self.artifact_registry,
+            attempt_registry=self.attempt_registry,
         )
 
         self._start_time_utc = time.time()
@@ -299,6 +308,37 @@ class CoordinatorService:
                 self.coordinator_id, len(restored_workloads), len(pending_redrive),
             )
 
+        # M10.1/M10.18: Attempts are restored after Workloads (an Attempt
+        # references a workload_id, mirroring Job->Workload ordering
+        # above) and before Artifacts (order-independent either way,
+        # kept consistent with the Job->Workload->Attempt->Artifact
+        # relationship documented in attempt.py).
+        #
+        # M10.6: any attempt that was ASSIGNED or RUNNING when the
+        # coordinator crashed has an UNKNOWN outcome -- the worker may
+        # have completed it, may still be working on it, or may itself
+        # be gone. It is marked LOST here (see AttemptStatus.LOST's
+        # docstring) BEFORE _redrive_recovered_workloads() fires, so the
+        # redrive creates a fresh, numbered attempt rather than leaving
+        # the stale one looking perpetually "in progress".
+        restored_attempts = self.state_store.load_attempts()
+        lost_count = 0
+        for attempt in restored_attempts:
+            if attempt.status in (AttemptStatus.ASSIGNED, AttemptStatus.RUNNING):
+                attempt.status = AttemptStatus.LOST
+                attempt.finished_at = attempt.finished_at or time.time()
+                attempt.failure_category = FailureCategory.WORKER_UNAVAILABLE
+                attempt.failure_reason = (
+                    attempt.failure_reason or "coordinator restarted while this attempt was in flight"
+                )
+                lost_count += 1
+            self.attempt_registry.restore_attempt(attempt)
+        if restored_attempts:
+            logger.info(
+                "Coordinator %s restored %d attempt(s) from persisted state (%d marked LOST as in-flight-at-crash).",
+                self.coordinator_id, len(restored_attempts), lost_count,
+            )
+
         restored_artifacts = self.state_store.load_artifacts()
         for artifact in restored_artifacts:
             self.artifact_registry.restore_artifact(artifact)
@@ -346,6 +386,12 @@ class CoordinatorService:
                     logger.warning(
                         "Coordinator evicted %d expired workers: %s", len(evicted), evicted
                     )
+                    # M10.6: reclassify any attempt this worker was
+                    # actively running -- see WorkloadOrchestrator.
+                    # handle_worker_lost()'s docstring for why this does
+                    # not itself trigger a competing dispatch.
+                    for wid in evicted:
+                        self.orchestrator.handle_worker_lost(wid)
 
                 # 2. Periodic penalty decay
                 now = time.time()
@@ -405,7 +451,24 @@ class CoordinatorService:
                             self.registry._workers[wid].status = WorkerStatus.DRAINING
                             # Kick off workload migration for all active workloads on this worker (M7.18)
                             asyncio.create_task(self.orchestrator.drain_worker(wid))
-                                
+                    elif behavior.state == M7WorkerState.STABLE:
+                        # M10.8: a worker previously put into DRAINING by
+                        # this same behavioral signal can transition back
+                        # to ACTIVE once that signal genuinely recovers
+                        # to STABLE. This reuses the existing M7 health
+                        # evaluation already running here rather than
+                        # inventing a second monitoring mechanism -- no
+                        # other code path in this codebase revives a
+                        # DRAINING worker (heartbeat revival only handles
+                        # OFFLINE -> ACTIVE; see WorkerRegistry.
+                        # record_heartbeat), so without this the DRAINING
+                        # state was previously a one-way trap.
+                        wid = worker_state.worker_id
+                        worker_info = self.registry.get_worker(wid)
+                        if worker_info and worker_info.status == WorkerStatus.DRAINING:
+                            logger.info(f"Worker {wid} behavioral risk recovered to STABLE; reviving DRAINING -> ACTIVE")
+                            self.registry._workers[wid].status = WorkerStatus.ACTIVE
+
             except Exception as exc:
                 logger.error("Coordinator health loop error: %s", exc)
 
@@ -837,6 +900,15 @@ class CoordinatorService:
                 resp["placement"] = record.placement_decision.model_dump()
             if record.execution_result:
                 resp["result"] = record.execution_result.model_dump()
+
+            # M10.17: expose attempt/retry/timing/checkpoint state through
+            # the existing workload API surface rather than a new
+            # endpoint. Same require_admin auth as the rest of this route
+            # -- never exposes worker credentials (attempt summaries only
+            # carry worker_id, not any credential material).
+            attempts = self.attempt_registry.list_attempts_for_workload(workload_id)
+            resp["attempts"] = [a.to_summary_dict() for a in attempts]
+            resp["attempt_count"] = len(attempts)
 
             return resp
 
