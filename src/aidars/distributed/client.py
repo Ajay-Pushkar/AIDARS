@@ -50,6 +50,7 @@ class DistributedClient:
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         default_timeout_seconds: float = 30.0,
         max_concurrent_transfers: int = 16,
+        bootstrap_secret: Optional[str] = None,
     ) -> None:
         self.cas_adapter = cas_adapter
         self.coordinator_url = coordinator_url.rstrip("/") if coordinator_url else None
@@ -58,6 +59,17 @@ class DistributedClient:
         self.default_timeout_seconds = default_timeout_seconds
         self.max_concurrent_transfers = max(1, int(max_concurrent_transfers))
         self.semaphore = asyncio.Semaphore(self.max_concurrent_transfers)
+
+        # M9: optional credentials. bootstrap_secret authorizes ONLY
+        # register_worker(); nothing else. Never logged. _worker_credential
+        # is populated automatically from a successful register_worker()
+        # response and used for send_heartbeat()/unregister_worker() from
+        # then on -- callers don't need to pass it explicitly. Both are
+        # None by default, preserving prior unauthenticated behavior for
+        # any caller/test that doesn't opt in (e.g. a coordinator running
+        # in insecure mode).
+        self._bootstrap_secret = bootstrap_secret
+        self._worker_credential: Optional[str] = None
 
         self._internal_client = http_client is None
         self.http_client = http_client or httpx.AsyncClient(
@@ -90,21 +102,38 @@ class DistributedClient:
             raise ValueError("Coordinator URL must be provided either in constructor or method call")
         return url
 
+    @staticmethod
+    def _auth_headers(token: Optional[str]) -> Dict[str, str]:
+        """M9: build an Authorization header if a credential is set, or an
+        empty dict otherwise -- never send a header with an empty/None
+        token, and never log the token itself."""
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
     async def register_worker(
         self,
         payload: WorkerRegistrationPayload,
         coordinator_url: Optional[str] = None,
     ) -> WorkerRegistrationResponse:
-        """Register a worker node with the coordinator."""
+        """Register a worker node with the coordinator.
+
+        Authenticated with this client's bootstrap_secret, if configured.
+        On success, the coordinator-issued worker_credential (if present
+        in the response) is stored and used automatically by
+        send_heartbeat()/unregister_worker() from then on.
+        """
         base_url = self._resolve_coord_url(coordinator_url)
         url = f"{base_url}/api/v1/workers/register"
         resp = await self.http_client.post(
             url,
             json=payload.model_dump(mode="json"),
+            headers=self._auth_headers(self._bootstrap_secret),
             timeout=self.default_timeout_seconds,
         )
         resp.raise_for_status()
-        return WorkerRegistrationResponse.model_validate(resp.json())
+        result = WorkerRegistrationResponse.model_validate(resp.json())
+        if result.worker_credential:
+            self._worker_credential = result.worker_credential
+        return result
 
     async def send_heartbeat(
         self,
@@ -119,6 +148,7 @@ class DistributedClient:
         resp = await self.http_client.post(
             url,
             json=body,
+            headers=self._auth_headers(self._worker_credential),
             timeout=self.default_timeout_seconds,
         )
         resp.raise_for_status()
@@ -134,6 +164,7 @@ class DistributedClient:
         url = f"{base_url}/api/v1/workers/{worker_id}/unregister"
         resp = await self.http_client.post(
             url,
+            headers=self._auth_headers(self._worker_credential),
             timeout=self.default_timeout_seconds,
         )
         resp.raise_for_status()
@@ -161,6 +192,7 @@ class DistributedClient:
         resp = await self.http_client.post(
             url,
             json=req_payload.model_dump(mode="json"),
+            headers=self._auth_headers(self._worker_credential),
             timeout=self.default_timeout_seconds,
         )
         resp.raise_for_status()

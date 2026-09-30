@@ -12,10 +12,20 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
+from aidars.distributed.auth import (
+    CredentialStore,
+    ReplayGuard,
+    make_check_replay,
+    make_require_admin,
+    make_require_admin_or_any_worker,
+    make_require_bootstrap,
+    make_require_worker,
+    make_require_worker_or_admin,
+)
 from aidars.distributed.models import (
     CandidateSource,
     ClusterTelemetry,
@@ -49,6 +59,19 @@ from aidars.distributed.workload import WorkloadOrchestrator
 
 logger = logging.getLogger(__name__)
 
+# M9: explicit, documented, deterministic bound on how many WorkloadSpecs
+# one Job submission can carry -- an oversized-metadata guard at the
+# request-structure level, distinct from WorkloadSpec.parameters' own
+# byte-size limit (models.py::MAX_WORKLOAD_PARAMETERS_BYTES).
+MAX_SPECS_PER_JOB = 1000
+
+# M9: coarse body-size cap enforced by middleware (see _create_fastapi_app).
+# Deliberately generous relative to a single WorkloadSpec/JobSubmitRequest
+# so legitimate multi-chunk job submissions aren't squeezed by two
+# overlapping limits -- this catches genuinely oversized bodies, the
+# per-field limits above catch oversized individual fields.
+MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024  # 4 MiB
+
 
 class JobSubmitRequest(BaseModel):
     """M8: request body for POST /api/v1/jobs/submit. Lives here rather
@@ -59,6 +82,17 @@ class JobSubmitRequest(BaseModel):
     specs: List[WorkloadSpec]
     completion_policy: CompletionPolicy = CompletionPolicy.ALL_REQUIRED
     threshold: Optional[int] = None
+
+    @field_validator("specs")
+    @classmethod
+    def validate_specs_count(cls, v: List[WorkloadSpec]) -> List[WorkloadSpec]:
+        """M9: oversized-metadata guard at the request-structure level."""
+        if len(v) > MAX_SPECS_PER_JOB:
+            raise ValueError(
+                f"job submission exceeds the maximum of {MAX_SPECS_PER_JOB} "
+                f"workload specs (got {len(v)})"
+            )
+        return v
 
 
 class CoordinatorService:
@@ -75,6 +109,7 @@ class CoordinatorService:
         prioritizer: Optional[CandidatePrioritizer] = None,
         latency_tracker: Optional[LatencyTracker] = None,
         state_store: Optional[CoordinatorStateStore] = None,
+        credential_store: Optional[CredentialStore] = None,
     ) -> None:
         self.coordinator_id = coordinator_id or f"coord-{uuid.uuid4().hex[:8]}"
         self.heartbeat_interval_seconds = float(heartbeat_interval_seconds)
@@ -87,6 +122,15 @@ class CoordinatorService:
         # before -- no SQLite dependency, no recovery, unless a store is
         # explicitly injected by the caller.
         self.state_store = state_store
+
+        # M9: authentication foundation. Unlike state_store, this is never
+        # None -- there is no legitimate "auth disabled" state other than
+        # the explicit AIDAR_INSECURE_MODE opt-in that CredentialStore
+        # itself resolves from the environment when not overridden here.
+        # Secure by default: a CoordinatorService() with no arguments is
+        # fully authenticated unless AIDAR_INSECURE_MODE is explicitly set.
+        self.credential_store = credential_store or CredentialStore()
+        self.replay_guard = ReplayGuard()
 
         self.latency_tracker = latency_tracker or LatencyTracker()
         self.prioritizer = prioritizer or CandidatePrioritizer(latency_tracker=self.latency_tracker)
@@ -388,6 +432,11 @@ class CoordinatorService:
             can_execute_workloads=payload.can_execute_workloads,
         )
         registered = self.registry.register_worker(worker_info)
+        # M9: mint a fresh per-worker credential on every successful
+        # registration (including re-registration after a restart/crash),
+        # replacing any previous one. Returned exactly once, in this
+        # response, never logged or persisted.
+        issued_credential = self.credential_store.issue_worker_credential(registered.worker_id)
         return WorkerRegistrationResponse(
             status="registered",
             worker_id=registered.worker_id,
@@ -396,6 +445,7 @@ class CoordinatorService:
             heartbeat_timeout_seconds=self.heartbeat_timeout_seconds,
             registered_at_utc=registered.registered_at_utc,
             acknowledged_inventory_count=len(registered.inventory_hashes),
+            worker_credential=issued_credential,
         )
 
     def locate_assets_sync(
@@ -540,6 +590,37 @@ class CoordinatorService:
             lifespan=lifespan,
         )
 
+        # M9: coarse request-body-size guard. Checks Content-Length only
+        # (cheap, no body read) -- a chunked-encoding request with no
+        # declared length is not caught here; that's a documented boundary
+        # rather than an attempt at full streaming-size enforcement, which
+        # would be more infrastructure than this milestone's scope calls
+        # for. Per-field limits (WorkloadSpec.parameters, JobSubmitRequest
+        # .specs) catch oversized content within an otherwise-valid body.
+        @app.middleware("http")
+        async def limit_request_body_size(request: Request, call_next):
+            content_length = request.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    declared_size = int(content_length)
+                except ValueError:
+                    declared_size = None
+                if declared_size is not None and declared_size > MAX_REQUEST_BODY_BYTES:
+                    return JSONResponse(
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                        content={"detail": f"Request body exceeds maximum size of {MAX_REQUEST_BODY_BYTES} bytes"},
+                    )
+            return await call_next(request)
+
+        # M9: auth dependencies, built once here from this service's own
+        # CredentialStore/ReplayGuard, per the locked authorization matrix.
+        require_admin = make_require_admin(self.credential_store)
+        require_bootstrap = make_require_bootstrap(self.credential_store)
+        require_worker = make_require_worker(self.credential_store)
+        require_worker_or_admin = make_require_worker_or_admin(self.credential_store)
+        require_admin_or_any_worker = make_require_admin_or_any_worker(self.credential_store)
+        check_replay = make_check_replay(self.credential_store, self.replay_guard)
+
         router = APIRouter(prefix="/api/v1")
 
         # --- Worker Registration ---
@@ -548,6 +629,7 @@ class CoordinatorService:
             response_model=WorkerRegistrationResponse,
             status_code=status.HTTP_200_OK,
             summary="Register a new or returning worker node",
+            dependencies=[Depends(require_bootstrap), Depends(check_replay)],
         )
         async def register_worker(payload: WorkerRegistrationPayload) -> WorkerRegistrationResponse:
             try:
@@ -561,6 +643,7 @@ class CoordinatorService:
             response_model=HeartbeatResponse,
             status_code=status.HTTP_200_OK,
             summary="Record periodic heartbeat and telemetry metrics",
+            dependencies=[Depends(require_worker)],
         )
         async def worker_heartbeat(
             worker_id: str,
@@ -613,6 +696,7 @@ class CoordinatorService:
             "/workers/{worker_id}/unregister",
             status_code=status.HTTP_200_OK,
             summary="Gracefully unregister a worker and prune its assets",
+            dependencies=[Depends(require_worker_or_admin)],
         )
         async def unregister_worker(worker_id: str) -> Dict[str, Any]:
             unregistered = self.registry.unregister_worker(worker_id)
@@ -629,6 +713,7 @@ class CoordinatorService:
             response_model=LocateAssetsResponse,
             status_code=status.HTTP_200_OK,
             summary="Locate candidate worker nodes for missing assets",
+            dependencies=[Depends(require_admin_or_any_worker)],
         )
         async def locate_assets(
             req: LocateAssetsRequest,
@@ -643,16 +728,24 @@ class CoordinatorService:
             response_model=ClusterTelemetry,
             status_code=status.HTTP_200_OK,
             summary="Retrieve global cluster statistics and health status",
+            dependencies=[Depends(require_admin)],
         )
         async def cluster_stats() -> ClusterTelemetry:
             return self.get_cluster_stats_sync()
 
         # --- Worker Queries ---
+        # M9: admin/client only. WorkerInfo exposes every worker's IP,
+        # port, capacity/utilization, health metrics, and full CAS
+        # inventory -- a worker has no functional need for this (its real
+        # peer-discovery need is served by /assets/locate, scoped to the
+        # specific hashes it actually asked about), so full-registry
+        # visibility is not extended to workers.
         @router.get(
             "/workers",
             response_model=List[WorkerInfo],
             status_code=status.HTTP_200_OK,
             summary="List all currently registered workers",
+            dependencies=[Depends(require_admin)],
         )
         async def list_workers(active_only: bool = True) -> List[WorkerInfo]:
             return self.registry.list_workers(active_only=active_only)
@@ -662,6 +755,7 @@ class CoordinatorService:
             response_model=WorkerInfo,
             status_code=status.HTTP_200_OK,
             summary="Get specific worker details",
+            dependencies=[Depends(require_admin)],
         )
         async def get_worker(worker_id: str) -> WorkerInfo:
             worker = self.registry.get_worker(worker_id)
@@ -709,6 +803,7 @@ class CoordinatorService:
             response_model=Dict[str, str],
             status_code=status.HTTP_202_ACCEPTED,
             summary="Submit a computational workload",
+            dependencies=[Depends(require_admin), Depends(check_replay)],
         )
         async def submit_workload(spec: WorkloadSpec) -> Dict[str, str]:
             try:
@@ -721,6 +816,7 @@ class CoordinatorService:
             "/workloads/{workload_id}",
             status_code=status.HTTP_200_OK,
             summary="Get workload status",
+            dependencies=[Depends(require_admin)],
         )
         async def get_workload_status(workload_id: str) -> Dict[str, Any]:
             record = self.workload_registry.get_workload(workload_id)
@@ -750,6 +846,7 @@ class CoordinatorService:
             response_model=Dict[str, str],
             status_code=status.HTTP_202_ACCEPTED,
             summary="Submit a Job (a durable grouping of one or more workloads)",
+            dependencies=[Depends(require_admin), Depends(check_replay)],
         )
         async def submit_job(req: JobSubmitRequest) -> Dict[str, str]:
             try:
@@ -773,6 +870,7 @@ class CoordinatorService:
             "/jobs/{job_id}",
             status_code=status.HTTP_200_OK,
             summary="Get Job status (derived aggregate over its member workloads)",
+            dependencies=[Depends(require_admin)],
         )
         async def get_job_status(job_id: str) -> Dict[str, Any]:
             job = self.job_registry.get_job(job_id)
@@ -795,6 +893,39 @@ class CoordinatorService:
                 "pending": aggregate.pending,
                 "running": aggregate.running,
                 "output_asset_hashes": sorted(aggregate.output_asset_hashes),
+            }
+
+        # --- Artifacts (M9 minimal retrieval surface) ---
+        # M9 requires "unauthorized artifact retrieval" to fail -- there was
+        # no artifact HTTP surface at all before this, so nothing existed to
+        # secure. This is the minimum needed to make that requirement
+        # testable: metadata only (no CAS byte-serving), admin/client only,
+        # matching the exact pattern of /jobs/{job_id} and
+        # /workloads/{workload_id}. Not a general artifact service -- no
+        # list endpoint, no byte download, no per-artifact ACLs.
+        @router.get(
+            "/artifacts/{artifact_id}",
+            status_code=status.HTTP_200_OK,
+            summary="Get Artifact metadata (minimal M9 retrieval surface)",
+            dependencies=[Depends(require_admin)],
+        )
+        async def get_artifact(artifact_id: str) -> Dict[str, Any]:
+            artifact = self.artifact_registry.get_artifact(artifact_id)
+            if not artifact:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Artifact '{artifact_id}' not found.",
+                )
+            return {
+                "artifact_id": artifact.artifact_id,
+                "content_hash": artifact.content_hash,
+                "producer_workload_id": artifact.producer_workload_id,
+                "producer_job_id": artifact.producer_job_id,
+                "created_at": artifact.created_at,
+                "verification_state": artifact.verification_state.value,
+                "lifecycle_state": artifact.lifecycle_state.value,
+                "storage_location": artifact.storage_location,
+                "size_bytes": artifact.size_bytes,
             }
 
         app.include_router(router)

@@ -59,6 +59,7 @@ class DistributedWorker:
         heartbeat_interval_seconds: float = 5.0,
         http_client: Optional[httpx.AsyncClient] = None,
         can_execute_workloads: bool = True,
+        bootstrap_secret: Optional[str] = None,
     ) -> None:
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
         self.ip_address = ip_address
@@ -107,6 +108,7 @@ class DistributedWorker:
             worker_id=self.worker_id,
             http_client=http_client,
             chunk_size=self.capabilities.chunk_size_bytes,
+            bootstrap_secret=bootstrap_secret,
         )
 
         self.resource_monitor = WorkerResourceMonitor(

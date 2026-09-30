@@ -15,11 +15,12 @@ job/M8 concerns are later, separately-scoped phases.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, TypeVar, Union
 
 from aidars.distributed.artifact import (
     Artifact,
@@ -34,6 +35,10 @@ from aidars.distributed.models import (
     WorkloadSpec,
 )
 from aidars.distributed.workload_registry import WorkloadRecord, WorkloadState
+
+logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 class CoordinatorStateStore:
@@ -59,6 +64,43 @@ class CoordinatorStateStore:
 
     def __del__(self) -> None:
         self.close()
+
+    @staticmethod
+    def _safe_reconstruct(
+        rows: List[sqlite3.Row],
+        converter: Callable[[sqlite3.Row], _T],
+        entity_name: str,
+        pk_column: str,
+    ) -> List[_T]:
+        """M9: recovery-abuse protection. A persisted row can be malformed
+        (corrupted JSON, a value that no longer matches its Pydantic
+        schema, an enum value that isn't valid) whether through disk
+        corruption, a bug in an older version, or deliberate tampering.
+        Reconstruction is therefore per-row and explicit: a row that
+        fails to deserialize is logged (loudly, with its primary key, but
+        never with the raw row content, which could contain sensitive
+        workload/job metadata) and excluded from the returned list --
+        never silently accepted as-is, and never allowed to abort loading
+        every OTHER valid row in the table (a single corrupted row must
+        not be a denial-of-service vector against the rest of coordinator
+        startup). Catching the broad `Exception` type here is deliberate,
+        not a bare `except:` -- deserialization can fail via
+        pydantic.ValidationError, json.JSONDecodeError, KeyError, or
+        ValueError (invalid enum value), and the whole point of this
+        method is defending against arbitrary malformed input, so every
+        failure mode must be caught, explicitly logged, and skipped.
+        """
+        results: List[_T] = []
+        for row in rows:
+            try:
+                results.append(converter(row))
+            except Exception as exc:
+                pk_value = row[pk_column] if pk_column in row.keys() else "<unknown>"
+                logger.error(
+                    "Skipping malformed persisted %s row (%s=%r): %s: %s",
+                    entity_name, pk_column, pk_value, type(exc).__name__, exc,
+                )
+        return results
 
     def close(self) -> None:
         if self._conn is not None:
@@ -184,8 +226,11 @@ class CoordinatorStateStore:
         with self._lock:
             if self._conn is None:
                 return []
-            rows = self._conn.execute("SELECT info_json FROM workers").fetchall()
-            return [WorkerInfo.model_validate_json(row["info_json"]) for row in rows]
+            rows = self._conn.execute("SELECT worker_id, info_json FROM workers").fetchall()
+            return self._safe_reconstruct(
+                rows, lambda row: WorkerInfo.model_validate_json(row["info_json"]),
+                entity_name="worker", pk_column="worker_id",
+            )
 
     # ------------------------------------------------------------------ #
     # Workloads
@@ -241,7 +286,10 @@ class CoordinatorStateStore:
             if self._conn is None:
                 return []
             rows = self._conn.execute("SELECT * FROM workloads").fetchall()
-            return [self._row_to_workload_record(row) for row in rows]
+            return self._safe_reconstruct(
+                rows, self._row_to_workload_record,
+                entity_name="workload", pk_column="workload_id",
+            )
 
     @staticmethod
     def _row_to_workload_record(row: sqlite3.Row) -> WorkloadRecord:
@@ -302,7 +350,10 @@ class CoordinatorStateStore:
             if self._conn is None:
                 return []
             rows = self._conn.execute("SELECT * FROM jobs").fetchall()
-            return [self._row_to_job_record(row) for row in rows]
+            return self._safe_reconstruct(
+                rows, self._row_to_job_record,
+                entity_name="job", pk_column="job_id",
+            )
 
     @staticmethod
     def _row_to_job_record(row: sqlite3.Row) -> JobRecord:
@@ -362,7 +413,10 @@ class CoordinatorStateStore:
             if self._conn is None:
                 return []
             rows = self._conn.execute("SELECT * FROM artifacts").fetchall()
-            return [self._row_to_artifact(row) for row in rows]
+            return self._safe_reconstruct(
+                rows, self._row_to_artifact,
+                entity_name="artifact", pk_column="artifact_id",
+            )
 
     @staticmethod
     def _row_to_artifact(row: sqlite3.Row) -> Artifact:

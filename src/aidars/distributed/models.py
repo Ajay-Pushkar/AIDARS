@@ -7,6 +7,7 @@ chunked binary transfer state, and metrics.
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
 import time
 from enum import Enum
@@ -21,6 +22,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # ============================================================================
 
 SHA256_HEX_REGEX = re.compile(r"^[a-fA-F0-9]{64}$")
+
+# M9: explicit, documented, deterministic bound on WorkloadSpec.parameters'
+# encoded JSON size. See WorkloadSpec.validate_parameters_size.
+MAX_WORKLOAD_PARAMETERS_BYTES = 65536
 
 
 def validate_sha256_hex(val: str) -> str:
@@ -236,6 +241,15 @@ class WorkerRegistrationResponse(BaseModel):
     heartbeat_timeout_seconds: float = Field(default=15.0, ge=0.01)
     registered_at_utc: float = Field(default_factory=time.time)
     acknowledged_inventory_count: int = Field(default=0, ge=0)
+    worker_credential: Optional[str] = Field(
+        default=None,
+        description="M9: a fresh, per-worker bearer credential issued at successful "
+                    "registration, returned exactly once. The worker must present it "
+                    "as 'Authorization: Bearer <token>' on every subsequent call bound "
+                    "to its worker_id (heartbeat, unregister). None when the coordinator "
+                    "has no CredentialStore configured (e.g. programmatic register_worker_sync "
+                    "callers that construct this model directly in tests).",
+    )
 
 
 class WorkerInfo(BaseModel):
@@ -613,6 +627,23 @@ class WorkloadSpec(BaseModel):
     @classmethod
     def validate_hashes(cls, v: Set[str]) -> Set[str]:
         return {validate_sha256_hex(h) for h in v}
+
+    @field_validator("parameters")
+    @classmethod
+    def validate_parameters_size(cls, v: Dict[str, Any]) -> Dict[str, Any]:
+        """M9: parameters is free-form and adapter-controlled, so it has no
+        structural size limit otherwise -- bound it explicitly to prevent
+        an oversized-metadata submission from a malicious or buggy caller.
+        64 KiB is generous for genuine per-chunk metadata (frame ranges,
+        chunk indices, expected-output counts) while still being a hard,
+        documented, deterministic ceiling."""
+        encoded_size = len(json.dumps(v, default=str))
+        if encoded_size > MAX_WORKLOAD_PARAMETERS_BYTES:
+            raise ValueError(
+                f"parameters exceeds the maximum size of {MAX_WORKLOAD_PARAMETERS_BYTES} "
+                f"bytes (encoded size: {encoded_size})"
+            )
+        return v
 
 
 class WorkerResourceProfile(BaseModel):
