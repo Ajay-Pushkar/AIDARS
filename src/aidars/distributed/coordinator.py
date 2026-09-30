@@ -41,6 +41,7 @@ from aidars.distributed.registry import ClusterStats, WorkerRegistry
 from aidars.distributed.state_store import CoordinatorStateStore
 from aidars.distributed.workload_registry import (
     TERMINAL_WORKLOAD_STATES,
+    WorkloadIdConflictError,
     WorkloadRecord,
     WorkloadRegistry,
 )
@@ -710,7 +711,10 @@ class CoordinatorService:
             summary="Submit a computational workload",
         )
         async def submit_workload(spec: WorkloadSpec) -> Dict[str, str]:
-            workload_id = await self.orchestrator.submit_workload(spec)
+            try:
+                workload_id = await self.orchestrator.submit_workload(spec)
+            except WorkloadIdConflictError as exc:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
             return {"workload_id": workload_id, "status": "submitted"}
 
         @router.get(
@@ -748,9 +752,21 @@ class CoordinatorService:
             summary="Submit a Job (a durable grouping of one or more workloads)",
         )
         async def submit_job(req: JobSubmitRequest) -> Dict[str, str]:
-            job_id = await self.orchestrator.submit_job(
-                req.specs, completion_policy=req.completion_policy, threshold=req.threshold,
-            )
+            try:
+                job_id = await self.orchestrator.submit_job(
+                    req.specs, completion_policy=req.completion_policy, threshold=req.threshold,
+                )
+            except WorkloadIdConflictError as exc:
+                # More specific than plain ValueError -- an existing
+                # workload_id under a different spec is a conflict with
+                # existing state (409), not a malformed request (400).
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+            except ValueError as exc:
+                # Expected input-validation errors from submit_job() itself
+                # (empty specs, specs with conflicting job_ids) or from
+                # JobRecord construction (THRESHOLD policy without a
+                # threshold) -- same convention as /workers/register.
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
             return {"job_id": job_id, "status": "submitted"}
 
         @router.get(

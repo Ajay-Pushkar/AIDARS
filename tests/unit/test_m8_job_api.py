@@ -67,3 +67,67 @@ def test_submit_job_endpoint_accepts_completion_policy_and_threshold(client: Tes
     data = status_resp.json()
     assert data["completion_policy"] == "threshold"
     assert data["threshold"] == 1
+
+
+# ============================================================================
+# Correction pass: /jobs/submit must convert expected client-input
+# ValueErrors into proper HTTP 4xx responses, not an unhandled 500.
+# ============================================================================
+
+
+def test_submit_job_empty_specs_returns_400_not_500(client: TestClient):
+    resp = client.post("/api/v1/jobs/submit", json={"specs": []})
+    assert resp.status_code == 400
+    assert "at least one" in resp.json()["detail"].lower()
+
+
+def test_submit_job_threshold_policy_without_threshold_returns_400_not_500(client: TestClient):
+    resp = client.post("/api/v1/jobs/submit", json={
+        "specs": [{"workload_id": "c0", "task_type": "test", "min_ram_bytes": 1024}],
+        "completion_policy": "threshold",
+        # threshold intentionally omitted
+    })
+    assert resp.status_code == 400
+    assert "threshold" in resp.json()["detail"].lower()
+
+
+def test_submit_job_conflicting_job_ids_across_specs_returns_400_not_500(client: TestClient):
+    resp = client.post("/api/v1/jobs/submit", json={
+        "specs": [
+            {"workload_id": "x", "job_id": "job-x", "task_type": "test", "min_ram_bytes": 1024},
+            {"workload_id": "y", "job_id": "job-y", "task_type": "test", "min_ram_bytes": 1024},
+        ],
+    })
+    assert resp.status_code == 400
+    assert "job_id" in resp.json()["detail"]
+
+
+def test_submit_job_invalid_completion_policy_value_returns_422(client: TestClient):
+    """Pydantic-level validation (unknown enum value) -- FastAPI's own
+    422, distinct from the application-level 400s above; documents the
+    existing boundary rather than something this pass changes."""
+    resp = client.post("/api/v1/jobs/submit", json={
+        "specs": [{"workload_id": "c0", "task_type": "test", "min_ram_bytes": 1024}],
+        "completion_policy": "not_a_real_policy",
+    })
+    assert resp.status_code == 422
+
+
+def test_submit_job_workload_id_conflict_returns_409(client: TestClient):
+    """The exact audit-reproduced case, at the /jobs/submit boundary."""
+    first = client.post("/api/v1/jobs/submit", json={
+        "specs": [{"workload_id": "dup", "job_id": "job-A", "task_type": "test", "min_ram_bytes": 1024}],
+    })
+    assert first.status_code == 202
+
+    second = client.post("/api/v1/jobs/submit", json={
+        "specs": [{"workload_id": "dup", "job_id": "job-B", "task_type": "test", "min_ram_bytes": 2048}],
+    })
+    assert second.status_code == 409
+    assert "dup" in second.json()["detail"]
+
+    # The original submission (job-A) must remain exactly as it was --
+    # never silently replaced.
+    status_resp = client.get("/api/v1/jobs/job-A")
+    assert status_resp.status_code == 200
+    assert status_resp.json()["workload_ids"] == ["dup"]

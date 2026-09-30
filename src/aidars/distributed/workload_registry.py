@@ -50,6 +50,36 @@ TERMINAL_WORKLOAD_STATES = frozenset({
 })
 
 
+class WorkloadIdConflictError(ValueError):
+    """Raised by WorkloadRegistry.add_workload() when workload_id already
+    refers to a DIFFERENT spec.
+
+    Subclasses ValueError so any existing/future caller that already
+    catches ValueError for input-validation purposes (e.g. the
+    CoordinatorService REST layer's existing convention) catches this
+    too without changes; callers that want to distinguish "this specific
+    ID is taken by something else" from a generic validation error can
+    catch WorkloadIdConflictError first.
+
+    workload_id is externally meaningful and persisted -- silently
+    replacing or silently dropping a submission under an existing ID
+    would mean the wrong WorkloadSpec gets dispatched/reported under
+    that ID. An identical resubmission (same spec, byte-for-byte) is NOT
+    a conflict -- see add_workload()'s docstring.
+    """
+
+    def __init__(self, workload_id: str, existing_spec: WorkloadSpec, incoming_spec: WorkloadSpec) -> None:
+        self.workload_id = workload_id
+        self.existing_spec = existing_spec
+        self.incoming_spec = incoming_spec
+        super().__init__(
+            f"workload_id '{workload_id}' already exists with a different spec "
+            f"(job_id={existing_spec.job_id!r}, task_type={existing_spec.task_type!r}); "
+            f"refusing to silently replace it or dispatch the new submission under "
+            f"the same ID."
+        )
+
+
 class WorkloadRecord:
     """A record of a workload's lifecycle and current state."""
 
@@ -95,9 +125,31 @@ class WorkloadRegistry:
         self._state_store.save_workload(snapshot)
 
     def add_workload(self, spec: WorkloadSpec) -> WorkloadRecord:
+        """Register a new workload, or, if workload_id already exists,
+        either no-op (identical resubmission) or reject (conflicting
+        submission).
+
+        Identity contract: workload_id is the sole identity key. If it
+        already exists:
+          - and the incoming spec is equal (==) to the existing one --
+            i.e. a byte-for-byte identical resubmission, such as a client
+            retrying after a dropped response -- this is idempotent: the
+            existing record is returned unchanged, exactly as before this
+            check existed (WorkloadSpec has no server-assigned mutable
+            fields, so equality here means "the caller is asking for the
+            exact same thing again").
+          - and the incoming spec differs in any field -- this is a
+            genuine identity collision: raises WorkloadIdConflictError
+            rather than silently keeping the old spec (previous behavior)
+            or silently overwriting it. Never dispatch a workload under
+            the wrong spec.
+        """
         with self._lock:
-            if spec.workload_id in self._workloads:
-                return self._workloads[spec.workload_id]
+            existing = self._workloads.get(spec.workload_id)
+            if existing is not None:
+                if existing.spec == spec:
+                    return existing
+                raise WorkloadIdConflictError(spec.workload_id, existing.spec, spec)
             record = WorkloadRecord(spec)
             self._workloads[spec.workload_id] = record
             snapshot = copy.deepcopy(record)
