@@ -27,6 +27,46 @@ SHA256_HEX_REGEX = re.compile(r"^[a-fA-F0-9]{64}$")
 # encoded JSON size. See WorkloadSpec.validate_parameters_size.
 MAX_WORKLOAD_PARAMETERS_BYTES = 65536
 
+_SENSITIVE_PARAMETER_KEY = re.compile(
+    r"(?:^|[^a-z0-9])(?:secret|password|passwd|token|credential|authorization|"
+    r"api[_-]?key|access[_-]?key|private[_-]?key)(?:$|[^a-z0-9])",
+    re.IGNORECASE,
+)
+_SENSITIVE_COMMAND_VALUE = re.compile(
+    r"(?i)(?P<prefix>(?:--?)(?:password|passwd|token|secret|api[-_]?key|"
+    r"access[-_]?key|authorization)(?:=|\s+)|"
+    r"(?:password|passwd|token|secret|api[-_]?key|access[-_]?key|authorization)"
+    r"\s*=\s*)(?P<value>\"[^\"]*\"|'[^']*'|[^\s;&|]+)"
+)
+_URL_USERINFO = re.compile(r"(?i)(https?://)[^/@\s]+:[^/@\s]+@")
+REDACTED_PARAMETER_VALUE = "[REDACTED]"
+
+
+def redact_workload_parameters(value: Any, key: Optional[str] = None) -> Any:
+    """Return metadata-safe parameter data without changing execution inputs.
+
+    Secret references are not part of the current workload contract, so
+    values under credential-shaped keys are redacted in persisted metadata.
+    Common inline command credentials and URL userinfo are redacted as well.
+    Ordinary non-sensitive parameter values pass through unchanged.
+    """
+    if key is not None and _SENSITIVE_PARAMETER_KEY.search(key.replace(".", "_")):
+        return REDACTED_PARAMETER_VALUE
+    if isinstance(value, dict):
+        return {
+            str(child_key): redact_workload_parameters(child_value, str(child_key))
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_workload_parameters(item) for item in value]
+    if isinstance(value, str):
+        value = _URL_USERINFO.sub(r"\1[REDACTED]@", value)
+        return _SENSITIVE_COMMAND_VALUE.sub(
+            lambda match: match.group("prefix") + REDACTED_PARAMETER_VALUE,
+            value,
+        )
+    return value
+
 
 def validate_sha256_hex(val: str) -> str:
     """Validate that a string is a 64-character hexadecimal SHA-256 digest.
@@ -642,6 +682,99 @@ class ClusterTelemetry(BaseModel):
 # M6 Workload & Execution Models
 # ============================================================================
 
+class ExecutionShape(str, Enum):
+    """Generic execution arrangement declared by an application submission."""
+
+    SINGLE_MACHINE = "single_machine"
+    TASK_SPLIT = "task_split"
+    PIPELINE = "pipeline"
+    DISTRIBUTED_NATIVE = "distributed_native"
+
+
+class RuntimeExecutionContext(BaseModel):
+    """Ephemeral, application-neutral view of a distributed execution group."""
+
+    execution_id: str
+    worker_id: str
+    rank: int = Field(ge=0)
+    world_size: int = Field(ge=1)
+    workers: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class WorkloadExecutionRequest(BaseModel):
+    spec: "WorkloadSpec"
+    execution_context: RuntimeExecutionContext
+
+
+class ExecutionGroup(BaseModel):
+    """Durable membership and lifecycle for one distributed-native attempt."""
+
+    execution_id: str
+    worker_ids: List[str]
+    required_worker_count: int = Field(ge=2, le=64)
+    state: Literal["assigned", "running", "completed", "failed", "lost"] = "assigned"
+    unavailable_worker_ids: Set[str] = Field(default_factory=set)
+    placement_decisions: List["PlacementDecision"] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_membership(self) -> "ExecutionGroup":
+        if len(self.worker_ids) != self.required_worker_count or len(set(self.worker_ids)) != len(self.worker_ids):
+            raise ValueError("execution group must contain the required number of distinct workers")
+        if not self.unavailable_worker_ids.issubset(set(self.worker_ids)):
+            raise ValueError("unavailable workers must belong to the execution group")
+        if self.placement_decisions and [item.selected_worker_id for item in self.placement_decisions] != self.worker_ids:
+            raise ValueError("execution group requires one placement decision per worker in membership order")
+        return self
+
+
+class ExecutionDescription(BaseModel):
+    """Adapter output: execution shape plus the existing generic workloads."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    execution_shape: ExecutionShape
+    workloads: List["WorkloadSpec"] = Field(min_length=1)
+    required_worker_count: int = Field(default=1, ge=1, le=64)
+
+    @model_validator(mode="after")
+    def validate_plan(self) -> "ExecutionDescription":
+        if self.execution_shape == ExecutionShape.DISTRIBUTED_NATIVE:
+            if len(self.workloads) != 1 or self.required_worker_count < 2:
+                raise ValueError("DISTRIBUTED_NATIVE requires one workload and at least two workers")
+        elif self.required_worker_count != 1:
+            raise ValueError("required_worker_count is only valid for DISTRIBUTED_NATIVE")
+        elif self.execution_shape == ExecutionShape.SINGLE_MACHINE and len(self.workloads) != 1:
+            raise ValueError("SINGLE_MACHINE requires exactly one workload")
+        if self.execution_shape == ExecutionShape.PIPELINE:
+            if len(self.workloads) < 2 or not any(item.depends_on for item in self.workloads):
+                raise ValueError("PIPELINE requires multiple workloads and at least one dependency")
+            ids = {item.workload_id for item in self.workloads}
+            if any(dep not in ids for item in self.workloads for dep in item.depends_on):
+                raise ValueError("pipeline dependencies must refer to workloads in the same execution")
+            _validate_dependency_graph({item.workload_id: item.depends_on for item in self.workloads})
+        return self
+
+
+def _validate_dependency_graph(dependencies: Dict[str, List[str]]) -> None:
+    visiting: Set[str] = set()
+    visited: Set[str] = set()
+
+    def visit(node: str) -> None:
+        if node in visiting:
+            raise ValueError("execution dependencies must not contain cycles")
+        if node in visited:
+            return
+        visiting.add(node)
+        for dependency in dependencies.get(node, []):
+            if dependency not in dependencies:
+                raise ValueError(f"unknown workload dependency: {dependency}")
+            visit(dependency)
+        visiting.remove(node)
+        visited.add(node)
+
+    for node in dependencies:
+        visit(node)
+
 class WorkloadSpec(BaseModel):
     """Declarative specification of a computational task."""
     model_config = ConfigDict(extra="ignore")
@@ -681,6 +814,9 @@ class WorkloadSpec(BaseModel):
     affinity_mode: Literal["none", "same_worker", "different_worker", "same_tag", "different_tag"] = "none"
     affinity_tag_key: Optional[str] = Field(default=None, max_length=128)
     affinity_hard: bool = True
+    # Dependency completion is success-only: every listed workload must
+    # complete before this workload becomes runnable.
+    depends_on: List[str] = Field(default_factory=list, max_length=1000)
     parameters: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("input_asset_hashes")
@@ -694,6 +830,8 @@ class WorkloadSpec(BaseModel):
             raise ValueError("affinity_group_id is required when affinity_mode is not 'none'")
         if self.affinity_mode in ("same_tag", "different_tag") and not self.affinity_tag_key:
             raise ValueError("affinity_tag_key is required for tag-scoped affinity")
+        if self.workload_id in self.depends_on or len(self.depends_on) != len(set(self.depends_on)):
+            raise ValueError("dependencies must be unique and cannot include the workload itself")
         return self
 
     @field_validator("parameters")
@@ -712,6 +850,16 @@ class WorkloadSpec(BaseModel):
                 f"bytes (encoded size: {encoded_size})"
             )
         return v
+
+    def redacted_metadata_json(self, *, indent: Optional[int] = None) -> str:
+        """Serialize this spec for metadata storage without mutating execution input."""
+        safe_parameters = redact_workload_parameters(self.parameters)
+        safe_spec = self.model_copy(update={"parameters": safe_parameters})
+        return safe_spec.model_dump_json(indent=indent)
+
+
+ExecutionDescription.model_rebuild()
+WorkloadExecutionRequest.model_rebuild()
 
 
 class WorkerResourceProfile(BaseModel):
@@ -780,6 +928,9 @@ class PlacementDecision(BaseModel):
     )
     locality_details: Dict[str, Any] = Field(default_factory=dict)
     deadline_details: Dict[str, Any] = Field(default_factory=dict)
+
+
+ExecutionGroup.model_rebuild()
 
 
 class WorkloadExecutionResult(BaseModel):

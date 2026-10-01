@@ -14,7 +14,7 @@ from typing import Dict, Optional, Set
 
 from aidars.distributed.cas_adapter import LocalCASAdapter
 from aidars.distributed.checkpoint import CURRENT_CHECKPOINT_FORMAT_VERSION
-from aidars.distributed.models import FailureCategory, WorkloadExecutionResult, WorkloadSpec
+from aidars.distributed.models import FailureCategory, RuntimeExecutionContext, WorkloadExecutionResult, WorkloadSpec
 from aidars.distributed.runtime import RuntimeAdapter
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,8 @@ class ExecutionManager:
         os.makedirs(self.workloads_dir, exist_ok=True)
 
     async def execute_workload(
-        self, spec: WorkloadSpec, worker_id: str, runtime: RuntimeAdapter
+        self, spec: WorkloadSpec, worker_id: str, runtime: RuntimeAdapter,
+        execution_context: Optional[RuntimeExecutionContext] = None,
     ) -> WorkloadExecutionResult:
         """Execute a workload from start to finish."""
         workload_id = spec.workload_id
@@ -60,7 +61,7 @@ class ExecutionManager:
 
         # Write metadata
         with open(os.path.join(workdir, "metadata.json"), "w", encoding="utf-8") as f:
-            f.write(spec.model_dump_json(indent=2))
+            f.write(spec.redacted_metadata_json(indent=2))
 
         # 2. Stage Dependencies
         # (This assumes the coordinator/client has already fetched missing hashes to CAS)
@@ -117,7 +118,7 @@ class ExecutionManager:
         runtime_exception: Optional[BaseException] = None
         try:
             success, stdout_snip, stderr_snip = await asyncio.wait_for(
-                runtime.execute(spec, workdir), timeout=timeout_seconds
+                runtime.execute_with_context(spec, workdir, execution_context), timeout=timeout_seconds
             )
         except asyncio.TimeoutError:
             success = False
@@ -193,7 +194,7 @@ class ExecutionManager:
         # isn't expected to have produced final outputs yet.
         verification_start = time.time()
         verification_failed = False
-        if success and not was_checkpointed:
+        if success and not was_checkpointed and execution_context is None:
             expected_output_count = spec.parameters.get("expected_output_count")
             if expected_output_count is not None and len(output_hashes) < expected_output_count:
                 success = False

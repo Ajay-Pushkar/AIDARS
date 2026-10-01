@@ -5,9 +5,11 @@ Defines the interface for running computational workloads inside isolated sandbo
 
 import abc
 import asyncio
+import json
+import os
 from typing import Any, Dict, Optional, Tuple
 
-from aidars.distributed.models import WorkloadSpec
+from aidars.distributed.models import RuntimeExecutionContext, WorkloadSpec
 
 
 class RuntimeAdapter(abc.ABC):
@@ -45,6 +47,13 @@ class RuntimeAdapter(abc.ABC):
         """Trigger a graceful checkpoint and halt execution."""
         pass
 
+    async def execute_with_context(
+        self, spec: WorkloadSpec, workdir: str,
+        context: Optional[RuntimeExecutionContext] = None,
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
+        """Context-aware additive boundary; legacy runtimes remain compatible."""
+        return await self.execute(spec, workdir)
+
 
 class GenericSubprocessRuntime(RuntimeAdapter):
     """A generic runtime that executes a script or command.
@@ -65,17 +74,32 @@ class GenericSubprocessRuntime(RuntimeAdapter):
     async def execute(
         self, spec: WorkloadSpec, workdir: str
     ) -> Tuple[bool, Optional[str], Optional[str]]:
+        return await self._execute(spec, workdir, None)
+
+    async def execute_with_context(
+        self, spec: WorkloadSpec, workdir: str,
+        context: Optional[RuntimeExecutionContext] = None,
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
+        return await self._execute(spec, workdir, context)
+
+    async def _execute(self, spec: WorkloadSpec, workdir: str,
+                       context: Optional[RuntimeExecutionContext]) -> Tuple[bool, Optional[str], Optional[str]]:
         """Executes a command based on the task_type or parameters."""
         command = spec.parameters.get("command")
         if not command:
             return False, None, "No command specified in parameters"
 
         try:
+            environment = None
+            if context is not None:
+                environment = os.environ.copy()
+                environment["AIDAR_EXECUTION_CONTEXT"] = json.dumps(context.model_dump(mode="json"))
             self._process = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=workdir,
+                env=environment,
             )
             
             # Wait for completion, enforcing the hard timeout at the ExecutionManager level

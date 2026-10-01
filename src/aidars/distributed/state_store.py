@@ -53,6 +53,8 @@ from aidars.distributed.artifact import (
 from aidars.distributed.attempt import AttemptRecord, AttemptStatus
 from aidars.distributed.job_registry import CompletionPolicy, JobRecord
 from aidars.distributed.models import (
+    ExecutionGroup,
+    ExecutionShape,
     FailureCategory,
     PlacementDecision,
     WorkerInfo,
@@ -284,10 +286,17 @@ class CoordinatorStateStore:
                     workload_ids_json TEXT NOT NULL,
                     completion_policy TEXT NOT NULL,
                     threshold INTEGER,
+                    execution_shape TEXT NOT NULL DEFAULT 'task_split',
+                    required_worker_count INTEGER NOT NULL DEFAULT 1,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
             """)
+            job_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(jobs)").fetchall()}
+            if "execution_shape" not in job_columns:
+                cursor.execute("ALTER TABLE jobs ADD COLUMN execution_shape TEXT NOT NULL DEFAULT 'task_split'")
+            if "required_worker_count" not in job_columns:
+                cursor.execute("ALTER TABLE jobs ADD COLUMN required_worker_count INTEGER NOT NULL DEFAULT 1")
 
             # M8.8/M8.9: Artifact provenance + lifecycle metadata only --
             # never a second copy of the CAS bytes or a second hash scheme.
@@ -337,6 +346,7 @@ class CoordinatorStateStore:
                     checkpoint_runtime_type TEXT,
                     checkpoint_format_version INTEGER,
                     placement_decision_json TEXT,
+                    execution_group_json TEXT,
                     updated_at REAL NOT NULL
                 );
             """)
@@ -346,6 +356,8 @@ class CoordinatorStateStore:
             }
             if "placement_decision_json" not in attempt_columns:
                 cursor.execute("ALTER TABLE attempts ADD COLUMN placement_decision_json TEXT")
+            if "execution_group_json" not in attempt_columns:
+                cursor.execute("ALTER TABLE attempts ADD COLUMN execution_group_json TEXT")
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_attempts_workload_id
                 ON attempts(workload_id);
@@ -435,7 +447,7 @@ class CoordinatorStateStore:
                     updated_at = excluded.updated_at;
             """, (
                 record.spec.workload_id,
-                record.spec.model_dump_json(),
+                record.spec.redacted_metadata_json(),
                 record.state.value,
                 placement_json,
                 placement_explanation_json,
@@ -498,12 +510,14 @@ class CoordinatorStateStore:
             self._conn.execute("""
                 INSERT INTO jobs (
                     job_id, workload_ids_json, completion_policy, threshold,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    execution_shape, required_worker_count, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO UPDATE SET
                     workload_ids_json = excluded.workload_ids_json,
                     completion_policy = excluded.completion_policy,
                     threshold = excluded.threshold,
+                    execution_shape = excluded.execution_shape,
+                    required_worker_count = excluded.required_worker_count,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at;
             """, (
@@ -511,6 +525,8 @@ class CoordinatorStateStore:
                 json.dumps(sorted(record.workload_ids)),
                 record.completion_policy.value,
                 record.threshold,
+                record.execution_shape.value,
+                record.required_worker_count,
                 record.created_at,
                 now,
             ))
@@ -522,10 +538,19 @@ class CoordinatorStateStore:
             if self._conn is None:
                 return []
             rows = self._conn.execute("SELECT * FROM jobs").fetchall()
-            return self._safe_reconstruct(
+            records = self._safe_reconstruct(
                 rows, self._row_to_job_record,
                 entity_name="job", pk_column="job_id",
             )
+            # Before execution shapes were stored, one-workload jobs were
+            # indistinguishable from split jobs. A one-member TaskSplit has
+            # identical dispatch behavior, so restore it as SINGLE_MACHINE
+            # rather than presenting an inaccurate shape to callers.
+            for record in records:
+                if (record.execution_shape == ExecutionShape.TASK_SPLIT
+                        and len(record.workload_ids) == 1):
+                    record.execution_shape = ExecutionShape.SINGLE_MACHINE
+            return records
 
     @staticmethod
     def _row_to_job_record(row: sqlite3.Row) -> JobRecord:
@@ -535,6 +560,11 @@ class CoordinatorStateStore:
             workload_ids=workload_ids,
             completion_policy=CompletionPolicy(row["completion_policy"]),
             threshold=row["threshold"],
+            execution_shape=(ExecutionShape(row["execution_shape"])
+                             if "execution_shape" in row.keys() and row["execution_shape"]
+                             else ExecutionShape.TASK_SPLIT),
+            required_worker_count=(row["required_worker_count"]
+                                   if "required_worker_count" in row.keys() else 1),
         )
         record.created_at = row["created_at"]
         return record
@@ -626,12 +656,12 @@ class CoordinatorStateStore:
             )
             self._conn.execute("""
                 INSERT INTO attempts (
-                    attempt_id, workload_id, attempt_number, status, worker_id,
-                    queued_at, assigned_at, started_at, finished_at,
-                    failure_category, failure_reason, execution_result_json,
-                    checkpoint_hash, checkpoint_runtime_type, checkpoint_format_version,
-                    placement_decision_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                attempt_id, workload_id, attempt_number, status, worker_id,
+                queued_at, assigned_at, started_at, finished_at,
+                failure_category, failure_reason, execution_result_json,
+                checkpoint_hash, checkpoint_runtime_type, checkpoint_format_version,
+                placement_decision_json, execution_group_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(attempt_id) DO UPDATE SET
                     status = excluded.status,
                     worker_id = excluded.worker_id,
@@ -643,9 +673,10 @@ class CoordinatorStateStore:
                     execution_result_json = excluded.execution_result_json,
                     checkpoint_hash = excluded.checkpoint_hash,
                     checkpoint_runtime_type = excluded.checkpoint_runtime_type,
-                    checkpoint_format_version = excluded.checkpoint_format_version,
-                    placement_decision_json = excluded.placement_decision_json,
-                    updated_at = excluded.updated_at;
+                checkpoint_format_version = excluded.checkpoint_format_version,
+                placement_decision_json = excluded.placement_decision_json,
+                execution_group_json = excluded.execution_group_json,
+                updated_at = excluded.updated_at;
             """, (
                 attempt.attempt_id,
                 attempt.workload_id,
@@ -661,9 +692,10 @@ class CoordinatorStateStore:
                 execution_result_json,
                 attempt.checkpoint_hash,
                 attempt.checkpoint_runtime_type,
-                attempt.checkpoint_format_version,
-                placement_decision_json,
-                now,
+            attempt.checkpoint_format_version,
+            placement_decision_json,
+            attempt.execution_group.model_dump_json() if attempt.execution_group is not None else None,
+            now,
             ))
             self._conn.commit()
 
@@ -705,6 +737,11 @@ class CoordinatorStateStore:
             placement_decision=(
                 PlacementDecision.model_validate_json(row["placement_decision_json"])
                 if "placement_decision_json" in row.keys() and row["placement_decision_json"]
+                else None
+            ),
+            execution_group=(
+                ExecutionGroup.model_validate_json(row["execution_group_json"])
+                if "execution_group_json" in row.keys() and row["execution_group_json"]
                 else None
             ),
         )

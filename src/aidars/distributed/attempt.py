@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from aidars.distributed.models import FailureCategory, PlacementDecision, WorkloadExecutionResult
+from aidars.distributed.models import ExecutionGroup, FailureCategory, PlacementDecision, WorkloadExecutionResult
 
 if TYPE_CHECKING:
     from aidars.distributed.state_store import CoordinatorStateStore
@@ -95,6 +95,7 @@ class AttemptRecord:
     # M12: immutable placement provenance for this attempt. Kept on the
     # attempt because a workload may be retried with a different decision.
     placement_decision: Optional[PlacementDecision] = None
+    execution_group: Optional[ExecutionGroup] = None
 
     # M10.7 checkpoint metadata -- lives on the Attempt (the natural owner
     # of "did THIS specific attempt produce a checkpoint"), not a separate
@@ -120,7 +121,7 @@ class AttemptRecord:
     def to_summary_dict(self) -> Dict[str, object]:
         """Compact, API-safe summary (Part 17: expose attempt/retry/timing
         state through the existing workload API surface)."""
-        return {
+        summary = {
             "attempt_id": self.attempt_id,
             "attempt_number": self.attempt_number,
             "status": self.status.value,
@@ -136,6 +137,25 @@ class AttemptRecord:
             "was_checkpointed": self.checkpoint_hash is not None,
             "checkpoint_hash": self.checkpoint_hash,
         }
+        if self.execution_group is not None:
+            summary["execution_group"] = {
+                "execution_id": self.execution_group.execution_id,
+                "state": self.execution_group.state,
+                "worker_ids": list(self.execution_group.worker_ids),
+                "required_worker_count": self.execution_group.required_worker_count,
+                "unavailable_worker_ids": sorted(self.execution_group.unavailable_worker_ids),
+                "placement_decisions": [
+                    {
+                        "selected_worker_id": decision.selected_worker_id,
+                        "placement_score": decision.placement_score,
+                        "score_breakdown": decision.score_breakdown,
+                        "candidate_explanations": decision.candidate_explanations,
+                        "m7_ranking_adjustments": decision.m7_ranking_adjustments,
+                    }
+                    for decision in self.execution_group.placement_decisions
+                ],
+            }
+        return summary
 
 
 class AttemptRegistry:
@@ -179,6 +199,7 @@ class AttemptRegistry:
         workload_id: str,
         worker_id: Optional[str] = None,
         placement_decision: Optional[PlacementDecision] = None,
+        execution_group: Optional[ExecutionGroup] = None,
     ) -> AttemptRecord:
         """Create the next-numbered attempt for workload_id. attempt_number
         starts at 1 and is stable/monotonic per workload_id -- the
@@ -193,6 +214,7 @@ class AttemptRegistry:
                 attempt_number=attempt_number,
                 worker_id=worker_id,
                 placement_decision=placement_decision,
+                execution_group=execution_group,
             )
             self._attempts[attempt_id] = record
             existing_ids.append(attempt_id)
@@ -244,6 +266,8 @@ class AttemptRegistry:
         def _mut(r: AttemptRecord) -> None:
             r.status = AttemptStatus.RUNNING
             r.started_at = time.time()
+            if r.execution_group is not None:
+                r.execution_group.state = "running"
         return self._update(attempt_id, _mut)
 
     def mark_succeeded(self, attempt_id: str, result: WorkloadExecutionResult) -> Optional[AttemptRecord]:
@@ -251,6 +275,8 @@ class AttemptRegistry:
             r.status = AttemptStatus.SUCCEEDED
             r.finished_at = time.time()
             r.execution_result = result
+            if r.execution_group is not None:
+                r.execution_group.state = "completed"
             if result.was_checkpointed and result.checkpoint_hash:
                 r.checkpoint_hash = result.checkpoint_hash
                 r.checkpoint_runtime_type = result.checkpoint_runtime_type
@@ -269,11 +295,14 @@ class AttemptRegistry:
             r.finished_at = time.time()
             r.failure_category = failure_category
             r.failure_reason = failure_reason
+            if r.execution_group is not None:
+                r.execution_group.state = "failed"
             if result is not None:
                 r.execution_result = result
         return self._update(attempt_id, _mut)
 
-    def mark_lost(self, attempt_id: str, reason: str) -> Optional[AttemptRecord]:
+    def mark_lost(self, attempt_id: str, reason: str,
+                  unavailable_worker_ids: Optional[List[str]] = None) -> Optional[AttemptRecord]:
         """M10.6: the owning worker disappeared while this attempt was
         RUNNING with no observed outcome. See AttemptStatus.LOST docstring."""
         def _mut(r: AttemptRecord) -> None:
@@ -281,6 +310,9 @@ class AttemptRegistry:
             r.finished_at = time.time()
             r.failure_category = FailureCategory.WORKER_UNAVAILABLE
             r.failure_reason = reason
+            if r.execution_group is not None:
+                r.execution_group.state = "lost"
+                r.execution_group.unavailable_worker_ids.update(unavailable_worker_ids or [])
         return self._update(attempt_id, _mut)
 
     def list_running_attempts_for_worker(self, worker_id: str) -> List[AttemptRecord]:
@@ -289,7 +321,9 @@ class AttemptRegistry:
         with self._lock:
             return [
                 r for r in self._attempts.values()
-                if r.worker_id == worker_id and r.status in (AttemptStatus.ASSIGNED, AttemptStatus.RUNNING)
+                if (r.worker_id == worker_id or
+                    (r.execution_group is not None and worker_id in r.execution_group.worker_ids))
+                and r.status in (AttemptStatus.ASSIGNED, AttemptStatus.RUNNING)
             ]
 
     def restore_attempt(self, record: AttemptRecord) -> None:

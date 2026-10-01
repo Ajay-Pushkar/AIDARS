@@ -31,6 +31,7 @@ from aidars.distributed.models import (
     WorkerRegistrationResponse,
     WorkerResourceProfile,
     WorkerStatus,
+    RuntimeExecutionContext,
     WorkloadSpec,
     WorkloadExecutionResult,
     validate_sha256_hex,
@@ -424,7 +425,8 @@ class DistributedWorker:
     # Workload Execution
     # ========================================================================
 
-    async def execute_workload(self, spec: WorkloadSpec) -> WorkloadExecutionResult:
+    async def execute_workload(self, spec: WorkloadSpec,
+                               execution_context: Optional[RuntimeExecutionContext] = None) -> WorkloadExecutionResult:
         """Synchronize required assets and execute the workload in a sandbox."""
         logger.info("Worker %s executing workload %s", self.worker_id, spec.workload_id)
         
@@ -458,6 +460,7 @@ class DistributedWorker:
             spec=spec,
             worker_id=self.worker_id,
             runtime=runtime,
+            execution_context=execution_context,
         )
         
         return result

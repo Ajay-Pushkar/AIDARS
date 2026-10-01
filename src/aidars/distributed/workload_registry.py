@@ -203,6 +203,17 @@ class WorkloadRegistry:
         self._persist_workload(snapshot)
         return True
 
+    def update_spec(self, spec: WorkloadSpec) -> bool:
+        """Persist an intentional additive update to a workload's input contract."""
+        with self._lock:
+            record = self._workloads.get(spec.workload_id)
+            if record is None:
+                return False
+            record.spec = spec.model_copy(deep=True)
+            snapshot = copy.deepcopy(record)
+        self._persist_workload(snapshot)
+        return True
+
     def set_placement_explanation(self, workload_id: str, explanation: dict) -> bool:
         with self._lock:
             record = self._workloads.get(workload_id)

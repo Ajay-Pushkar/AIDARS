@@ -23,6 +23,7 @@ from aidars.distributed.models import (
     validate_sha256_hex,
     WorkloadSpec,
     WorkloadExecutionResult,
+    WorkloadExecutionRequest,
 )
 from aidars.distributed.transfer import (
     DEFAULT_CHUNK_SIZE,
@@ -244,6 +245,17 @@ class WorkerServer:
             # For this sync API, we just await it directly (suitable for testing/demo).
             result = await self.distributed_worker.execute_workload(spec)
             return result
+
+        @router.post("/workloads/execute-group", response_model=WorkloadExecutionResult,
+                     summary="Execute one member of a distributed-native worker group")
+        async def execute_group_workload_endpoint(request: WorkloadExecutionRequest) -> WorkloadExecutionResult:
+            if not self.distributed_worker:
+                raise HTTPException(status_code=500, detail="Worker instance not linked to server")
+            if request.execution_context.worker_id != self.worker_id:
+                raise HTTPException(status_code=400, detail="Execution context worker_id does not match this worker")
+            return await self.distributed_worker.execute_workload(
+                request.spec, execution_context=request.execution_context,
+            )
 
         @router.post("/api/v1/workloads/{workload_id}/checkpoint")
         async def checkpoint_workload_endpoint(workload_id: str) -> Dict[str, Any]:

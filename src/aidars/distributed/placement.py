@@ -312,3 +312,38 @@ class PlacementEngine:
                               "fallback_estimated_miss": (deadline_slack < 0) if deadline_slack is not None and predicted_duration_seconds is None else None,
                               "ranking_scope": "workload_admission_only"} if spec.deadline_at_utc is not None else {},
         )
+
+    def evaluate_group(self, spec: WorkloadSpec, profiles: List[WorkerResourceProfile],
+                       worker_count: int, **kwargs) -> Optional[List[PlacementDecision]]:
+        """Select a complete group by repeatedly applying the existing hard-gated
+        single-worker evaluator. A partial group is never returned/reserved.
+        Each member decision retains its own M11 candidate explanation.
+        """
+        if worker_count < 2:
+            raise ValueError("distributed execution groups require at least two workers")
+        remaining = list(profiles)
+        decisions: List[PlacementDecision] = []
+        group_candidates: List[Dict[str, object]] = []
+        for _ in range(worker_count):
+            decision = self.evaluate(spec, remaining, **kwargs)
+            if decision is None:
+                group_candidates.extend(dict(item) for item in self.last_evaluation.get("candidates", []))
+                self.last_group_evaluation = {
+                    "required_worker_count": worker_count,
+                    "selected_worker_ids": [item.selected_worker_id for item in decisions],
+                    "complete": False,
+                    "candidates": group_candidates,
+                }
+                return None
+            decisions.append(decision)
+            group_candidates.extend(dict(item) for item in decision.candidate_explanations)
+            remaining = [profile for profile in remaining
+                         if profile.worker_id != decision.selected_worker_id]
+        self.last_group_evaluation = {
+            "required_worker_count": worker_count,
+            "selected_worker_ids": [item.selected_worker_id for item in decisions],
+            "complete": True,
+            "candidates": group_candidates,
+            "member_decisions": [item.model_dump(mode="json") for item in decisions],
+        }
+        return decisions

@@ -13,6 +13,7 @@ import pytest
 from aidars.distributed.attempt import AttemptRegistry, AttemptStatus
 from aidars.distributed.coordinator import CoordinatorService
 from aidars.distributed.models import (
+    ExecutionGroup,
     HeartbeatPayload,
     WorkerInfo,
     WorkerStatus,
@@ -144,7 +145,14 @@ def test_restart_marks_in_flight_attempts_as_lost(tmp_path: Path):
     looking perpetually 'in progress'."""
     store = CoordinatorStateStore(tmp_path / "state.db")
     attempt_registry = AttemptRegistry(state_store=store)
-    a = attempt_registry.create_attempt("task-1")
+    a = attempt_registry.create_attempt(
+        "task-1",
+        worker_id="w-1",
+        execution_group=ExecutionGroup(
+            execution_id="recovery-group", worker_ids=["w-1", "w-2"],
+            required_worker_count=2, state="running",
+        ),
+    )
     attempt_registry.mark_assigned(a.attempt_id, "w-1")
     attempt_registry.mark_running(a.attempt_id)  # crash happens here -- never resolved
     store.close()
@@ -156,6 +164,9 @@ def test_restart_marks_in_flight_attempts_as_lost(tmp_path: Path):
     assert restored.status == AttemptStatus.LOST
     assert restored.failure_category is not None
     assert restored.finished_at is not None
+    persisted = service.state_store.load_attempts()[0]
+    assert persisted.status == AttemptStatus.LOST
+    assert persisted.execution_group.state == "lost"
 
 
 def test_restart_marks_merely_assigned_attempts_as_lost_too(tmp_path: Path):

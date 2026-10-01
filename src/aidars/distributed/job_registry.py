@@ -26,6 +26,7 @@ from aidars.distributed.workload_registry import (
     WorkloadRegistry,
     WorkloadState,
 )
+from aidars.distributed.models import ExecutionShape
 
 if TYPE_CHECKING:
     from aidars.distributed.state_store import CoordinatorStateStore
@@ -106,13 +107,24 @@ class JobRecord:
         workload_ids: Set[str],
         completion_policy: CompletionPolicy = CompletionPolicy.ALL_REQUIRED,
         threshold: Optional[int] = None,
+        execution_shape: ExecutionShape = ExecutionShape.TASK_SPLIT,
+        required_worker_count: int = 1,
     ) -> None:
         if completion_policy == CompletionPolicy.THRESHOLD and not threshold:
             raise ValueError("THRESHOLD completion policy requires a positive threshold")
+        if execution_shape == ExecutionShape.DISTRIBUTED_NATIVE:
+            if len(workload_ids) != 1 or required_worker_count < 2 or required_worker_count > 64:
+                raise ValueError("DISTRIBUTED_NATIVE requires one workload and 2 to 64 workers")
+        elif required_worker_count != 1:
+            raise ValueError("required_worker_count is only valid for DISTRIBUTED_NATIVE")
+        elif execution_shape == ExecutionShape.SINGLE_MACHINE and len(workload_ids) != 1:
+            raise ValueError("SINGLE_MACHINE requires exactly one workload")
         self.job_id = job_id
         self.workload_ids: Set[str] = set(workload_ids)
         self.completion_policy = completion_policy
         self.threshold = threshold
+        self.execution_shape = execution_shape
+        self.required_worker_count = required_worker_count
         self.created_at = time.time()
 
 
@@ -145,6 +157,8 @@ class JobRegistry:
         workload_ids: Set[str],
         completion_policy: CompletionPolicy = CompletionPolicy.ALL_REQUIRED,
         threshold: Optional[int] = None,
+        execution_shape: ExecutionShape = ExecutionShape.TASK_SPLIT,
+        required_worker_count: int = 1,
     ) -> JobRecord:
         """Create (or, if job_id already exists, return the existing) Job record.
 
@@ -154,7 +168,8 @@ class JobRegistry:
         with self._lock:
             if job_id in self._jobs:
                 return self._jobs[job_id]
-            record = JobRecord(job_id, workload_ids, completion_policy, threshold)
+            record = JobRecord(job_id, workload_ids, completion_policy, threshold,
+                               execution_shape, required_worker_count)
             self._jobs[job_id] = record
             snapshot = copy.deepcopy(record)
         self._persist_job(snapshot)

@@ -31,10 +31,11 @@ import httpx
 import pytest
 from httpx import ASGITransport
 
+from aidars.distributed import coordinator
 from aidars.distributed.attempt import AttemptStatus
 from aidars.distributed.cas_adapter import LocalCASAdapter
 from aidars.distributed.coordinator import CoordinatorService
-from aidars.distributed.models import HeartbeatPayload, WorkloadSpec
+from aidars.distributed.models import HeartbeatPayload, PlacementDecision, WorkloadSpec
 from aidars.distributed.worker import DistributedWorker
 from aidars.distributed.workload_registry import WorkloadState
 
@@ -158,8 +159,30 @@ async def test_one_worker_failure_does_not_affect_the_others(three_worker_cluste
 
     coordinator.orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
-    spec = WorkloadSpec(workload_id="task-1", task_type="test", min_ram_bytes=1024)
+    spec = WorkloadSpec(
+        workload_id="task-1",
+        task_type="test",
+        min_ram_bytes=1024,
+    )
     coordinator.workload_registry.add_workload(spec)
+
+    real_evaluate = coordinator.orchestrator.placement_engine.evaluate
+    first_placement = True
+
+    def deterministic_first_placement(spec, profiles, **kwargs):
+        nonlocal first_placement
+
+        decision = real_evaluate(spec, profiles, **kwargs)
+        assert decision is not None
+
+        if first_placement:
+            first_placement = False
+            return decision.model_copy(update={"selected_worker_id": "worker-a"})
+
+        return decision
+
+    coordinator.orchestrator.placement_engine.evaluate = deterministic_first_placement
+
     await coordinator.orchestrator._process_workload("task-1")
 
     record = coordinator.workload_registry.get_workload("task-1")

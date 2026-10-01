@@ -31,6 +31,8 @@ from aidars.distributed.models import (
     CandidateSource,
     ClusterTelemetry,
     FailureCategory,
+    ExecutionDescription,
+    ExecutionShape,
     HeartbeatPayload,
     HeartbeatResponse,
     LocateAssetsRequest,
@@ -86,6 +88,8 @@ class JobSubmitRequest(BaseModel):
     specs: List[WorkloadSpec]
     completion_policy: CompletionPolicy = CompletionPolicy.ALL_REQUIRED
     threshold: Optional[int] = None
+    execution_shape: Optional[ExecutionShape] = None
+    required_worker_count: int = 1
 
     @field_validator("specs")
     @classmethod
@@ -341,11 +345,17 @@ class CoordinatorService:
         for attempt in restored_attempts:
             if attempt.status in (AttemptStatus.ASSIGNED, AttemptStatus.RUNNING):
                 attempt.status = AttemptStatus.LOST
+                if attempt.execution_group is not None:
+                    attempt.execution_group.state = "lost"
                 attempt.finished_at = attempt.finished_at or time.time()
                 attempt.failure_category = FailureCategory.WORKER_UNAVAILABLE
                 attempt.failure_reason = (
                     attempt.failure_reason or "coordinator restarted while this attempt was in flight"
                 )
+                # Recovery is a durable state transition too: persist LOST
+                # before exposing the reconstructed attempt or re-driving
+                # its workload, including the ExecutionGroup state in JSON.
+                self.state_store.save_attempt(attempt)
                 lost_count += 1
             self.attempt_registry.restore_attempt(attempt)
         if restored_attempts:
@@ -912,6 +922,12 @@ class CoordinatorService:
             dependencies=[Depends(require_admin), Depends(check_replay)],
         )
         async def submit_workload(spec: WorkloadSpec) -> Dict[str, str]:
+            if spec.depends_on:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=("Workload dependencies must be submitted through "
+                            "the validated /jobs/submit or /executions/submit path"),
+                )
             try:
                 workload_id = await self.orchestrator.submit_workload(spec)
             except WorkloadIdConflictError as exc:
@@ -953,6 +969,13 @@ class CoordinatorService:
 
             resp = {
                 "workload_id": workload_id,
+                "job_id": record.spec.job_id,
+                "execution_shape": (
+                    self.job_registry.get_job(record.spec.job_id).execution_shape.value
+                    if record.spec.job_id and self.job_registry.get_job(record.spec.job_id)
+                    else ExecutionShape.SINGLE_MACHINE.value
+                ),
+                "depends_on": list(record.spec.depends_on),
                 "state": record.state.value,
                 "submitted_at": record.submitted_at,
                 "completed_at": record.completed_at,
@@ -1050,6 +1073,8 @@ class CoordinatorService:
             try:
                 job_id = await self.orchestrator.submit_job(
                     req.specs, completion_policy=req.completion_policy, threshold=req.threshold,
+                    execution_shape=req.execution_shape,
+                    required_worker_count=req.required_worker_count,
                 )
             except WorkloadIdConflictError as exc:
                 # More specific than plain ValueError -- an existing
@@ -1061,6 +1086,19 @@ class CoordinatorService:
                 # (empty specs, specs with conflicting job_ids) or from
                 # JobRecord construction (THRESHOLD policy without a
                 # threshold) -- same convention as /workers/register.
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+            return {"job_id": job_id, "status": "submitted"}
+
+        @router.post("/executions/submit", response_model=Dict[str, str],
+                     status_code=status.HTTP_202_ACCEPTED,
+                     summary="Submit an adapter-produced execution description",
+                     dependencies=[Depends(require_admin), Depends(check_replay)])
+        async def submit_execution(description: ExecutionDescription) -> Dict[str, str]:
+            try:
+                job_id = await self.orchestrator.submit_execution(description)
+            except WorkloadIdConflictError as exc:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+            except ValueError as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
             return {"job_id": job_id, "status": "submitted"}
 
@@ -1083,6 +1121,8 @@ class CoordinatorService:
                 "workload_ids": sorted(job.workload_ids),
                 "completion_policy": job.completion_policy.value,
                 "threshold": job.threshold,
+                "execution_shape": job.execution_shape.value,
+                "required_worker_count": job.required_worker_count,
                 "created_at": job.created_at,
                 "state": aggregate.state.value,
                 "total": aggregate.total,
