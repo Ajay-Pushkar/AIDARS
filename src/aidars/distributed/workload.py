@@ -469,7 +469,10 @@ class WorkloadOrchestrator:
                 self.workload_registry.set_placement_explanation(workload_id, {})
                 self.workload_registry.update_state(workload_id, WorkloadState.PLACED)
                 if self.attempt_registry is not None:
-                    attempt = self.attempt_registry.create_attempt(workload_id)
+                    attempt = self.attempt_registry.create_attempt(
+                        workload_id,
+                        placement_decision=decision,
+                    )
                     attempt_id = attempt.attempt_id
                 if attempt_id:
                     self.attempt_registry.mark_assigned(attempt_id, decision.selected_worker_id)
@@ -502,14 +505,6 @@ class WorkloadOrchestrator:
                 resp.raise_for_status()
                 result_data = resp.json()
                 result = WorkloadExecutionResult(**result_data)
-
-                if self.m7_ingestor:
-                    self.m7_ingestor.on_workload_completed(
-                        workload_type=spec.task_type,
-                        duration=result.execution_duration_seconds,
-                        ram_peak=1024,
-                        failed=not result.success,
-                    )
 
                 if result.was_checkpointed:
                     # M10.7: only reachable when the executing runtime

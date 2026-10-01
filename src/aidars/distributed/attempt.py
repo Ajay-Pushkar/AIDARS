@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from aidars.distributed.models import FailureCategory, WorkloadExecutionResult
+from aidars.distributed.models import FailureCategory, PlacementDecision, WorkloadExecutionResult
 
 if TYPE_CHECKING:
     from aidars.distributed.state_store import CoordinatorStateStore
@@ -92,6 +92,9 @@ class AttemptRecord:
     failure_category: Optional[FailureCategory] = None
     failure_reason: Optional[str] = None
     execution_result: Optional[WorkloadExecutionResult] = None
+    # M12: immutable placement provenance for this attempt. Kept on the
+    # attempt because a workload may be retried with a different decision.
+    placement_decision: Optional[PlacementDecision] = None
 
     # M10.7 checkpoint metadata -- lives on the Attempt (the natural owner
     # of "did THIS specific attempt produce a checkpoint"), not a separate
@@ -146,13 +149,37 @@ class AttemptRegistry:
         self._attempts: Dict[str, AttemptRecord] = {}
         self._by_workload: Dict[str, List[str]] = {}  # workload_id -> [attempt_id, ...] in creation order
         self._state_store = state_store
+        self._observers = []
+
+    def add_observer(self, callback) -> None:
+        """Register a best-effort lifecycle observer; observers never own state."""
+        with self._lock:
+            self._observers.append(callback)
+
+    def _notify_observers(self, snapshot: Optional[AttemptRecord]) -> None:
+        if snapshot is None:
+            return
+        with self._lock:
+            observers = list(self._observers)
+        for observer in observers:
+            try:
+                observer(copy.deepcopy(snapshot))
+            except Exception:
+                # Analytics must not alter attempt lifecycle or dispatch.
+                import logging
+                logging.getLogger(__name__).exception("Attempt observer failed")
 
     def _persist(self, snapshot: Optional[AttemptRecord]) -> None:
         if self._state_store is None or snapshot is None:
             return
         self._state_store.save_attempt(snapshot)
 
-    def create_attempt(self, workload_id: str, worker_id: Optional[str] = None) -> AttemptRecord:
+    def create_attempt(
+        self,
+        workload_id: str,
+        worker_id: Optional[str] = None,
+        placement_decision: Optional[PlacementDecision] = None,
+    ) -> AttemptRecord:
         """Create the next-numbered attempt for workload_id. attempt_number
         starts at 1 and is stable/monotonic per workload_id -- the
         workload_id itself never changes across retries."""
@@ -165,11 +192,13 @@ class AttemptRegistry:
                 workload_id=workload_id,
                 attempt_number=attempt_number,
                 worker_id=worker_id,
+                placement_decision=placement_decision,
             )
             self._attempts[attempt_id] = record
             existing_ids.append(attempt_id)
             snapshot = copy.deepcopy(record)
         self._persist(snapshot)
+        self._notify_observers(snapshot)
         return record
 
     def get_attempt(self, attempt_id: str) -> Optional[AttemptRecord]:
@@ -180,6 +209,10 @@ class AttemptRegistry:
         with self._lock:
             ids = self._by_workload.get(workload_id, [])
             return [self._attempts[i] for i in ids if i in self._attempts]
+
+    def list_attempts(self) -> List[AttemptRecord]:
+        with self._lock:
+            return [copy.deepcopy(record) for record in self._attempts.values()]
 
     def get_latest_attempt(self, workload_id: str) -> Optional[AttemptRecord]:
         attempts = self.list_attempts_for_workload(workload_id)
@@ -197,6 +230,7 @@ class AttemptRegistry:
             mutator(record)
             snapshot = copy.deepcopy(record)
         self._persist(snapshot)
+        self._notify_observers(snapshot)
         return snapshot
 
     def mark_assigned(self, attempt_id: str, worker_id: str) -> Optional[AttemptRecord]:

@@ -105,6 +105,30 @@ def test_multiple_attempts_for_same_workload_all_persist_independently(tmp_path:
     assert all(a.workload_id == "task-1" for a in reloaded)
 
 
+def test_existing_attempt_schema_is_migrated_additively_for_placement_snapshot(tmp_path: Path):
+    db_path = tmp_path / "old-attempts.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("""CREATE TABLE attempts (
+        attempt_id TEXT PRIMARY KEY, workload_id TEXT NOT NULL, attempt_number INTEGER NOT NULL,
+        status TEXT NOT NULL, worker_id TEXT, queued_at REAL NOT NULL, assigned_at REAL,
+        started_at REAL, finished_at REAL, failure_category TEXT, failure_reason TEXT,
+        execution_result_json TEXT, checkpoint_hash TEXT, checkpoint_runtime_type TEXT,
+        checkpoint_format_version INTEGER, updated_at REAL NOT NULL)""")
+    conn.execute("INSERT INTO attempts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("legacy#1", "legacy", 1, "queued", None, time.time(), None, None, None,
+         None, None, None, None, None, None, time.time()))
+    conn.commit()
+    conn.close()
+
+    store = CoordinatorStateStore(db_path)
+    loaded = store.load_attempts()
+    assert len(loaded) == 1
+    assert loaded[0].attempt_id == "legacy#1"
+    assert loaded[0].placement_decision is None
+    columns = {row["name"] for row in store._conn.execute("PRAGMA table_info(attempts)")}
+    assert "placement_decision_json" in columns
+
+
 # ============================================================================
 # Malformed row handling (mirrors the existing _safe_reconstruct pattern
 # already exercised for workers/workloads/jobs/artifacts)

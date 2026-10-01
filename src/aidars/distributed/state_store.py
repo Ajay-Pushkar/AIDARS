@@ -336,9 +336,16 @@ class CoordinatorStateStore:
                     checkpoint_hash TEXT,
                     checkpoint_runtime_type TEXT,
                     checkpoint_format_version INTEGER,
+                    placement_decision_json TEXT,
                     updated_at REAL NOT NULL
                 );
             """)
+            # Additive M12 migration for existing coordinator databases.
+            attempt_columns = {
+                row["name"] for row in cursor.execute("PRAGMA table_info(attempts)").fetchall()
+            }
+            if "placement_decision_json" not in attempt_columns:
+                cursor.execute("ALTER TABLE attempts ADD COLUMN placement_decision_json TEXT")
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_attempts_workload_id
                 ON attempts(workload_id);
@@ -612,14 +619,19 @@ class CoordinatorStateStore:
                 if attempt.execution_result is not None
                 else None
             )
+            placement_decision_json = (
+                attempt.placement_decision.model_dump_json()
+                if attempt.placement_decision is not None
+                else None
+            )
             self._conn.execute("""
                 INSERT INTO attempts (
                     attempt_id, workload_id, attempt_number, status, worker_id,
                     queued_at, assigned_at, started_at, finished_at,
                     failure_category, failure_reason, execution_result_json,
                     checkpoint_hash, checkpoint_runtime_type, checkpoint_format_version,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    placement_decision_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(attempt_id) DO UPDATE SET
                     status = excluded.status,
                     worker_id = excluded.worker_id,
@@ -632,6 +644,7 @@ class CoordinatorStateStore:
                     checkpoint_hash = excluded.checkpoint_hash,
                     checkpoint_runtime_type = excluded.checkpoint_runtime_type,
                     checkpoint_format_version = excluded.checkpoint_format_version,
+                    placement_decision_json = excluded.placement_decision_json,
                     updated_at = excluded.updated_at;
             """, (
                 attempt.attempt_id,
@@ -649,6 +662,7 @@ class CoordinatorStateStore:
                 attempt.checkpoint_hash,
                 attempt.checkpoint_runtime_type,
                 attempt.checkpoint_format_version,
+                placement_decision_json,
                 now,
             ))
             self._conn.commit()
@@ -688,4 +702,9 @@ class CoordinatorStateStore:
             checkpoint_hash=row["checkpoint_hash"],
             checkpoint_runtime_type=row["checkpoint_runtime_type"],
             checkpoint_format_version=row["checkpoint_format_version"],
+            placement_decision=(
+                PlacementDecision.model_validate_json(row["placement_decision_json"])
+                if "placement_decision_json" in row.keys() and row["placement_decision_json"]
+                else None
+            ),
         )

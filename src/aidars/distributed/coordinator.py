@@ -46,6 +46,7 @@ from aidars.distributed.models import (
 )
 from aidars.m7.telemetry import TelemetryMemory, TelemetryIngestor
 from aidars.m7.controller import M7OrchestratorBridge
+from aidars.m12.service import DistributedIntelligence
 from aidars.distributed.artifact import ArtifactRegistry
 from aidars.distributed.job_registry import CompletionPolicy, JobRegistry
 from aidars.distributed.prioritizer import CandidatePrioritizer, LatencyTracker
@@ -159,6 +160,14 @@ class CoordinatorService:
         self.m7_memory = TelemetryMemory()
         self.m7_ingestor = TelemetryIngestor(self.m7_memory)
         self.m7_bridge = M7OrchestratorBridge(self.m7_memory)
+        self.m12_intelligence = DistributedIntelligence(self.m7_memory, self.registry)
+        self.attempt_registry.add_observer(
+            lambda attempt: self.m12_intelligence.observe_attempt(
+                attempt,
+                self.workload_registry.get_workload(attempt.workload_id),
+                self.attempt_registry.list_attempts_for_workload(attempt.workload_id),
+            )
+        )
 
         self.orchestrator = WorkloadOrchestrator(
             self.registry,
@@ -267,6 +276,9 @@ class CoordinatorService:
         order.
         """
         if self.state_store is None:
+            self.m12_intelligence.rebuild_history(
+                self.workload_registry.list_workloads(), self.attempt_registry.list_attempts()
+            )
             return []
 
         restored_workers = self.state_store.load_workers()
@@ -350,6 +362,12 @@ class CoordinatorService:
                 "Coordinator %s restored %d artifact(s) from persisted state.",
                 self.coordinator_id, len(restored_artifacts),
             )
+
+        # Replay validated attempt facts into the existing M7 temporal
+        # memory and M12 read models after source ledgers have been restored.
+        self.m12_intelligence.rebuild_history(
+            self.workload_registry.list_workloads(), self.attempt_registry.list_attempts()
+        )
 
         return pending_redrive
 
@@ -987,6 +1005,38 @@ class CoordinatorService:
             resp["attempt_count"] = len(attempts)
 
             return resp
+
+        # M12: administrative, read-only intelligence views. These are
+        # derived from validated attempt history and current telemetry;
+        # no response feeds placement or changes worker state.
+        @router.get("/intelligence/workloads/{workload_id}", dependencies=[Depends(require_admin)])
+        async def get_workload_intelligence(workload_id: str) -> Dict[str, Any]:
+            record = self.workload_registry.get_workload(workload_id)
+            if record is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workload not found")
+            return self.m12_intelligence.workload_view(record).model_dump(mode="json")
+
+        @router.get("/intelligence/workers/{worker_id}", dependencies=[Depends(require_admin)])
+        async def get_worker_intelligence(worker_id: str) -> Dict[str, Any]:
+            if not self.registry.has_worker(worker_id):
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker not found")
+            return self.m12_intelligence.worker_view(worker_id).model_dump(mode="json")
+
+        @router.get("/intelligence/capacity", dependencies=[Depends(require_admin)])
+        async def get_capacity_forecast() -> Dict[str, Any]:
+            return self.m12_intelligence.capacity_view(
+                self.workload_registry.list_workloads()
+            ).model_dump(mode="json")
+
+        @router.get("/intelligence/anomalies", dependencies=[Depends(require_admin)])
+        async def get_intelligence_anomalies() -> List[Dict[str, Any]]:
+            return [item.model_dump(mode="json") for item in self.m12_intelligence.anomalies()]
+
+        @router.get("/intelligence/recommendations", dependencies=[Depends(require_admin)])
+        async def get_intelligence_recommendations() -> List[Dict[str, Any]]:
+            return [item.model_dump(mode="json") for item in self.m12_intelligence.recommendations(
+                self.workload_registry.list_workloads()
+            )]
 
         # --- Jobs (M8) ---
         @router.post(

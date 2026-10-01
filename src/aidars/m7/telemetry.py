@@ -5,7 +5,7 @@ windows using Exponential Moving Averages (EMA) to understand baseline behavior,
 current trends, and sudden shifts.
 """
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 import time
 
 @dataclass
@@ -71,6 +71,12 @@ class TelemetryMemory:
     def __init__(self):
         self.workers: Dict[str, WorkerTemporalState] = {}
         self.workloads: Dict[str, WorkloadTemporalState] = {}
+        self._workload_event_ids: Set[str] = set()
+
+    def reset_workload_history(self) -> None:
+        """Clear replayable workload aggregates before durable-history replay."""
+        self.workloads.clear()
+        self._workload_event_ids.clear()
 
     def ingest_worker_metrics(self, worker_id: str, cpu_ratio: float, ram_ratio: float, latency: float, failed: bool = False) -> None:
         """Ingest a real-time observation of a worker's health/metrics."""
@@ -84,16 +90,30 @@ class TelemetryMemory:
         state.failure_rate_ema.update(1.0 if failed else 0.0)
         state.last_updated_utc = time.time()
 
-    def ingest_workload_result(self, workload_type: str, duration: float, ram_peak: float, failed: bool) -> None:
+    def ingest_workload_result(
+        self,
+        workload_type: str,
+        duration: Optional[float],
+        ram_peak: Optional[float],
+        failed: bool,
+        *,
+        event_id: Optional[str] = None,
+    ) -> None:
         """Ingest the execution result of a completed or failed workload."""
+        if event_id is not None:
+            if event_id in self._workload_event_ids:
+                return
+            self._workload_event_ids.add(event_id)
         if workload_type not in self.workloads:
             self.workloads[workload_type] = WorkloadTemporalState(workload_type=workload_type)
             
         state = self.workloads[workload_type]
         if not failed:
-            # Only update duration and ram on success
-            state.duration_ema.update(duration)
-            state.ram_peak_ema.update(ram_peak)
+            # Never synthesize missing duration or resource measurements.
+            if duration is not None and duration > 0:
+                state.duration_ema.update(duration)
+            if ram_peak is not None and ram_peak >= 0:
+                state.ram_peak_ema.update(ram_peak)
             
         state.failure_rate_ema.update(1.0 if failed else 0.0)
         state.last_executed_utc = time.time()

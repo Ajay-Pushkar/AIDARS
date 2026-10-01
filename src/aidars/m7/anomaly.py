@@ -7,6 +7,13 @@ from aidars.m7.contracts import AnomalyScore
 
 class AnomalyDetector:
     """Detects deviations between predicted and observed execution."""
+
+    @staticmethod
+    def duration_ratio(expected_duration_seconds: float, observed_duration_seconds: float) -> float:
+        """Shared deterministic duration comparison for advisory anomaly views."""
+        if expected_duration_seconds <= 0:
+            return 1.0
+        return observed_duration_seconds / expected_duration_seconds
     
     @staticmethod
     def detect(expected: 'PredictionResult', observed_duration_seconds: float, observed_ram_peak: int, persistence_history: float = 0.0) -> AnomalyScore:
