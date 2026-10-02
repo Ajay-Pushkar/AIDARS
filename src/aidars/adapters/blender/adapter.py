@@ -47,6 +47,21 @@ class BlenderAdapter(ApplicationAdapter):
             for record in asset_records
             if record.sha256 and record.source_path
         }
+        
+        # M14.6: Ensure the primary input file is hashed and included.
+        # This is critical so the worker downloads the .blend file itself, not just its dependencies.
+        input_file_hash = None
+        if input_path:
+            import os
+            import hashlib
+            if os.path.exists(input_path) and os.path.isfile(input_path):
+                hasher = hashlib.sha256()
+                with open(input_path, "rb") as f:
+                    while chunk_data := f.read(65536):
+                        hasher.update(chunk_data)
+                input_file_hash = hasher.hexdigest()
+                resolved_paths_by_hash[input_file_hash] = input_path
+
         input_asset_hashes = set(resolved_paths_by_hash.keys())
 
         # If a Master-side AssetManager was supplied, physically ingest every
@@ -75,6 +90,30 @@ class BlenderAdapter(ApplicationAdapter):
 
         specs = []
         for idx, chunk in enumerate(plan.chunks):
+            params = {
+                "input_path": input_path,
+                "frame_start": chunk.frame_start,
+                "frame_end": chunk.frame_end,
+                "chunk_index": idx,
+                # M8.6: one output file expected per frame in this chunk.
+                "expected_output_count": chunk.frame_count,
+                # M8.7: the job's overall requested range, so a
+                # frame-coverage check can be done per-chunk without
+                # needing the original request dict.
+                "job_frame_start": frame_start,
+                "job_frame_end": frame_end,
+            }
+            
+            # M14.6: Populate the 'command' parameter for GenericSubprocessRuntime.
+            # ExecutionManager stages the file at 'inputs/{hash}' and runs with cwd=workdir.
+            # Blender will output to 'outputs/' which ExecutionManager scans for artifacts.
+            if input_file_hash:
+                params["command"] = (
+                    f"blender -b inputs/{input_file_hash} "
+                    f"-o outputs/frame_#### "
+                    f"-s {chunk.frame_start} -e {chunk.frame_end} -a"
+                )
+
             spec = WorkloadSpec(
                 workload_id=f"{job_id}-chunk-{idx}",
                 job_id=job_id,
@@ -85,19 +124,7 @@ class BlenderAdapter(ApplicationAdapter):
                 requires_gpu=requires_gpu,
                 min_vram_bytes=min_vram_bytes,
                 estimated_duration_seconds=float(chunk.frame_count) * 2.0, # 2 sec per frame (existing convention)
-                parameters={
-                    "input_path": input_path,
-                    "frame_start": chunk.frame_start,
-                    "frame_end": chunk.frame_end,
-                    "chunk_index": idx,
-                    # M8.6: one output file expected per frame in this chunk.
-                    "expected_output_count": chunk.frame_count,
-                    # M8.7: the job's overall requested range, so a
-                    # frame-coverage check can be done per-chunk without
-                    # needing the original request dict.
-                    "job_frame_start": frame_start,
-                    "job_frame_end": frame_end,
-                }
+                parameters=params
             )
             specs.append(spec)
 

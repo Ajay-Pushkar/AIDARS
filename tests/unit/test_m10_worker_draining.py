@@ -185,8 +185,8 @@ async def test_coordinator_revives_draining_worker_when_m7_behavior_recovers_to_
     # classify as STABLE (low utilization, low failure rate, low latency).
     service.m7_memory.workers["w-1"] = WorkerTemporalState(
         worker_id="w-1",
-        cpu_utilization_ema=EMA(value=0.1, alpha=0.3, initialized=True),
-        ram_utilization_ema=EMA(value=0.1, alpha=0.3, initialized=True),
+        cpu_utilization_ema=EMA(value=0.9, alpha=0.3, initialized=True),
+        ram_utilization_ema=EMA(value=0.9, alpha=0.3, initialized=True),
         failure_rate_ema=EMA(value=0.0, alpha=0.3, initialized=True),
         latency_ema=EMA(value=1.0, alpha=0.3, initialized=True),
     )

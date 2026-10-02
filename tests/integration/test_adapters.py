@@ -46,6 +46,9 @@ def test_blender_adapter_produces_generic_workload():
     assert specs[0].task_type == "blender_render"
     assert specs[0].requires_gpu is True
     assert specs[0].min_ram_bytes > 0
+    # M14.6: command generation
+    assert "command" in specs[0].parameters
+    assert specs[0].parameters["command"].startswith("blender -b inputs/")
 
 def test_llm_adapter_produces_generic_workload():
     adapter = LLMAdapter()
@@ -137,10 +140,12 @@ def test_blender_adapter_input_asset_hashes_are_real_sha256(tmp_path):
 
 def test_blender_adapter_missing_asset_produces_no_fake_hash(tmp_path):
     """Phase 4A: a scene referencing a texture that does NOT exist on disk
-    must not fabricate a hash for it, and must not raise."""
+    must not fabricate a hash for it, and must not raise.
+    M14.6: The input_path itself is correctly hashed and included."""
     scene_path = tmp_path / "scene.json"
-    # wood.png is referenced but intentionally never created on disk.
-    scene_path.write_text(json.dumps(_scene_with_texture_reference("wood.png")), encoding="utf-8")
+    scene_bytes = json.dumps(_scene_with_texture_reference("wood.png")).encode("utf-8")
+    scene_path.write_bytes(scene_bytes)
+    scene_hash = hashlib.sha256(scene_bytes).hexdigest()
 
     adapter = BlenderAdapter()
     specs = adapter.evaluate_request({
@@ -151,7 +156,7 @@ def test_blender_adapter_missing_asset_produces_no_fake_hash(tmp_path):
     })
 
     assert len(specs) == 1
-    assert specs[0].input_asset_hashes == set()
+    assert specs[0].input_asset_hashes == {scene_hash}
 
 
 def test_blender_adapter_scheduling_unchanged_alongside_asset_hashes(tmp_path):
@@ -223,10 +228,12 @@ def test_blender_adapter_ingests_resolved_asset_into_supplied_cas(tmp_path):
 
 def test_blender_adapter_missing_asset_not_ingested_into_cas(tmp_path):
     """A referenced-but-absent texture must not appear in WorkloadSpec
-    hashes, and nothing must be inserted into CAS for it."""
+    hashes, and nothing must be inserted into CAS for it.
+    M14.6: The input_path itself is correctly hashed and ingested."""
     scene_path = tmp_path / "scene.json"
-    # wood.png is referenced but intentionally never created on disk.
-    scene_path.write_text(json.dumps(_scene_with_texture_reference("wood.png")), encoding="utf-8")
+    scene_bytes = json.dumps(_scene_with_texture_reference("wood.png")).encode("utf-8")
+    scene_path.write_bytes(scene_bytes)
+    scene_hash = hashlib.sha256(scene_bytes).hexdigest()
 
     cas = LocalCASAdapter(cas_dir=tmp_path / "master_cas")
     asset_manager = AssetManager(cas)
@@ -239,8 +246,9 @@ def test_blender_adapter_missing_asset_not_ingested_into_cas(tmp_path):
         "worker_count": 1,
     })
 
-    assert specs[0].input_asset_hashes == set()
-    assert cas.get_cas_stats()["total_assets"] == 0
+    assert specs[0].input_asset_hashes == {scene_hash}
+    assert cas.get_cas_stats()["total_assets"] == 1
+    assert cas.has_asset(scene_hash) is True
 
 
 def test_blender_adapter_without_asset_manager_skips_ingestion_safely(tmp_path):

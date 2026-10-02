@@ -41,6 +41,17 @@ class ExecutionManager:
         outputs_dir = os.path.join(workdir, "outputs")
         logs_dir = os.path.join(workdir, "logs")
 
+        # 0. Abort any existing execution of this workload
+        existing_runtime = self.active_runtimes.get(workload_id)
+        if existing_runtime:
+            logger.warning(f"Workload {workload_id} is already running. Aborting old execution.")
+            try:
+                await existing_runtime.checkpoint()
+                # Wait briefly for it to terminate
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.error(f"Failed to abort old execution for {workload_id}: {e}")
+
         # 1. Isolate Workspace
         try:
             if os.path.exists(workdir):

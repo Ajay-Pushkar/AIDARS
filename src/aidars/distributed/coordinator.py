@@ -468,8 +468,8 @@ class CoordinatorService:
                     from aidars.m7.contracts import WorkerFeatureVector
                     
                     features = WorkerFeatureVector(
-                        cpu_available_ratio=1.0 - worker_state.cpu_utilization_ema.value,
-                        ram_available_ratio=1.0 - worker_state.ram_utilization_ema.value,
+                        cpu_available_ratio=worker_state.cpu_utilization_ema.value,
+                        ram_available_ratio=worker_state.ram_utilization_ema.value,
                         vram_available_ratio=1.0,
                         has_gpu=0.0,
                         active_workload_ratio=0.0,

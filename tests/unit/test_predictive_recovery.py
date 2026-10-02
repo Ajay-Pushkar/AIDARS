@@ -96,8 +96,8 @@ async def test_predictive_recovery_e2e(tmp_path):
         )
         coord.m7_memory.ingest_worker_metrics(
             worker_b_id,
-            cpu_ratio=0.1, # CPU steady at 10% utilization
-            ram_ratio=0.1,
+            cpu_ratio=0.9, # CPU steady at 10% utilization (90% available)
+            ram_ratio=0.9,
             latency=5.0,
             failed=False
         )      
