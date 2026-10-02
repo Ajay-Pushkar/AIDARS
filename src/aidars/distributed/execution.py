@@ -176,14 +176,11 @@ class ExecutionManager:
                 for root, _, files in os.walk(outputs_dir):
                     for filename in files:
                         filepath = os.path.join(root, filename)
-                        with open(filepath, "rb") as f:
-                            data = f.read()
-
-                        # Use CAS staging for atomic commit and hashing
+                        # Use chunked CAS staging via thread pool to avoid blocking the event loop
                         try:
-                            h = self.cas.store_bytes(data)
+                            h = await asyncio.to_thread(self.cas.store_file, filepath)
                             output_hashes.add(h)
-                            output_sizes[h] = len(data)
+                            output_sizes[h] = os.path.getsize(filepath)
                         except Exception as e:
                             logger.error(f"Failed to store {filename}: {e}")
                             raise e

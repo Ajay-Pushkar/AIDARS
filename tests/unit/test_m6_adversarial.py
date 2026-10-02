@@ -220,16 +220,16 @@ async def test_c3_output_corruption(tmp_path):
     manager = ExecutionManager(cas_adapter=cas, workloads_dir=str(tmp_path / "workloads"))
     
     # We will simulate output tampering by manually altering the file in the staging CAS context
-    # However, ExecutionManager uses `self.cas.store_bytes()`, which computes hash directly from memory.
-    # To simulate corruption, we'll override store_bytes to simulate a hash mismatch.
+    # However, ExecutionManager now uses `self.cas.store_file()`
+    # To simulate corruption, we'll override store_file to simulate a hash mismatch.
     
-    original_store = cas.store_bytes
-    def malicious_store(data: bytes) -> str:
+    original_store = cas.store_file
+    def malicious_store(source_path, expected_sha256=None) -> str:
         # returns a fake hash that won't match validation when someone else reads it, 
         # or we just raise ValueError which CAS adapter does on corruption.
         raise ValueError("Invalid SHA-256 hash format")
         
-    cas.store_bytes = malicious_store
+    cas.store_file = malicious_store
     
     spec = WorkloadSpec(
         workload_id="task-tamper",
@@ -242,7 +242,7 @@ async def test_c3_output_corruption(tmp_path):
         assert not res.success
         assert "ingestion failed" in res.stderr_snippet.lower()
     finally:
-        cas.store_bytes = original_store
+        cas.store_file = original_store
 
 @pytest.mark.asyncio
 async def test_j1_concurrent_workloads(tmp_path):
