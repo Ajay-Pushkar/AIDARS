@@ -634,6 +634,14 @@ class CoordinatorStateStore:
             size_bytes=row["size_bytes"],
         )
 
+    def delete_artifact(self, artifact_id: str) -> None:
+        """Remove an Artifact's persisted row, if any (M16.1 GC)."""
+        with self._lock:
+            if self._conn is None:
+                return
+            self._conn.execute("DELETE FROM artifacts WHERE artifact_id = ?", (artifact_id,))
+            self._conn.commit()
+
     # ------------------------------------------------------------------ #
     # Attempts (M10.1/M10.18)
     # ------------------------------------------------------------------ #

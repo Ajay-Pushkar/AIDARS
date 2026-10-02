@@ -84,7 +84,7 @@ def test_m14_5_coordinator_restart_recovery(docker_cluster):
         resp = httpx.get(f"http://127.0.0.1:8000/api/v1/workloads/{workload_id}", headers=headers)
         if resp.status_code == 200:
             data = resp.json()
-            if data["state"] == "placed" or data["state"] == "running":
+            if data["state"] in ("placed", "syncing_assets", "ready", "executing"):
                 assert "placement" in data
                 selected_worker_id = data["placement"]["selected_worker_id"]
                 break

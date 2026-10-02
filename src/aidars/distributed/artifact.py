@@ -213,3 +213,30 @@ class ArtifactRegistry:
             snapshot = artifact
         self._persist_artifact(snapshot)
         return True
+
+    def purge_deleted_artifacts(self, artifact_ids: Iterable[str]) -> int:
+        """Permanently remove DELETED artifacts from memory and SQLite (M16.1 GC)."""
+        count = 0
+        for artifact_id in artifact_ids:
+            with self._lock:
+                artifact = self._artifacts.get(artifact_id)
+                if artifact is None or artifact.lifecycle_state != ArtifactLifecycleState.DELETED:
+                    continue
+
+            # Persist the SQLite DELETE first (allows retry on failure).
+            if self._state_store is not None:
+                self._state_store.delete_artifact(artifact_id)
+
+            # Only after successful SQLite deletion, remove from memory.
+            with self._lock:
+                # Re-check in case of race, though unlikely to change from DELETED
+                artifact = self._artifacts.get(artifact_id)
+                if artifact is not None and artifact.lifecycle_state == ArtifactLifecycleState.DELETED:
+                    del self._artifacts[artifact_id]
+                    hash_set = self._by_hash.get(artifact.content_hash)
+                    if hash_set is not None:
+                        hash_set.discard(artifact_id)
+                        if not hash_set:
+                            del self._by_hash[artifact.content_hash]
+                    count += 1
+        return count

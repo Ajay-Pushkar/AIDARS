@@ -113,6 +113,7 @@ class CoordinatorService:
         heartbeat_timeout_seconds: float = 15.0,
         eviction_interval_seconds: float = 5.0,
         penalty_decay_interval_seconds: float = 30.0,
+        artifact_gc_interval_seconds: float = 60.0,
         registry: Optional[WorkerRegistry] = None,
         prioritizer: Optional[CandidatePrioritizer] = None,
         latency_tracker: Optional[LatencyTracker] = None,
@@ -124,6 +125,7 @@ class CoordinatorService:
         self.heartbeat_timeout_seconds = float(heartbeat_timeout_seconds)
         self.eviction_interval_seconds = float(eviction_interval_seconds)
         self.penalty_decay_interval_seconds = float(penalty_decay_interval_seconds)
+        self.artifact_gc_interval_seconds = float(artifact_gc_interval_seconds)
 
         # Optional coordinator-state persistence/recovery (Phase 5.2C).
         # None (the default) preserves pure in-memory behavior exactly as
@@ -187,6 +189,7 @@ class CoordinatorService:
         self._running: bool = False
         self._eviction_task: Optional[asyncio.Task] = None
         self._health_task: Optional[asyncio.Task] = None
+        self._artifact_gc_task: Optional[asyncio.Task] = None
         self.app: FastAPI = self._create_fastapi_app()
 
     # ========================================================================
@@ -208,6 +211,7 @@ class CoordinatorService:
         pending_redrive = self._restore_persisted_state()
         self._eviction_task = asyncio.create_task(self._run_eviction_loop())
         self._health_task = asyncio.create_task(self._evaluate_cluster_health_loop())
+        self._artifact_gc_task = asyncio.create_task(self._run_artifact_gc_loop())
         self._redrive_recovered_workloads(pending_redrive)
         logger.info("CoordinatorService %s started.", self.coordinator_id)
 
@@ -232,6 +236,15 @@ class CoordinatorService:
             except asyncio.CancelledError:
                 pass
             self._health_task = None
+
+        if self._artifact_gc_task:
+            self._artifact_gc_task.cancel()
+            try:
+                await self._artifact_gc_task
+            except asyncio.CancelledError:
+                pass
+            self._artifact_gc_task = None
+
         await self.orchestrator.stop_queue()
 
         logger.info("CoordinatorService %s stopped.", self.coordinator_id)
@@ -511,6 +524,49 @@ class CoordinatorService:
 
             except Exception as exc:
                 logger.error("Coordinator health loop error: %s", exc)
+
+    async def _run_artifact_gc_loop(self) -> None:
+        """Periodic loop that safely reaps unreferenced Artifact metadata."""
+        from aidars.distributed.artifact import ArtifactLifecycleState
+        while self._running:
+            try:
+                await asyncio.sleep(self.artifact_gc_interval_seconds)
+                if not self._running:
+                    break
+
+                if self.artifact_registry is not None:
+                    # 1. Purge already DELETED artifacts
+                    deleted_ids = [
+                        a.artifact_id for a in self.artifact_registry.list_artifacts()
+                        if a.lifecycle_state == ArtifactLifecycleState.DELETED
+                    ]
+                    if deleted_ids:
+                        self.artifact_registry.purge_deleted_artifacts(deleted_ids)
+
+                    # 2. Transition GC_ELIGIBLE -> DELETED
+                    eligible_to_delete = [
+                        a.artifact_id for a in self.artifact_registry.list_artifacts()
+                        if a.lifecycle_state == ArtifactLifecycleState.GC_ELIGIBLE
+                    ]
+                    for aid in eligible_to_delete:
+                        self.artifact_registry.mark_deleted(aid)
+
+                    # 3. Transition AVAILABLE -> GC_ELIGIBLE for non-terminal jobs
+                    protected_job_ids = set()
+                    if self.job_registry is not None:
+                        for job in self.job_registry.list_jobs():
+                            agg = self.job_registry.get_aggregate(job.job_id)
+                            if agg is not None and not agg.is_terminal:
+                                protected_job_ids.add(job.job_id)
+
+                    newly_eligible = self.artifact_registry.compute_gc_eligible(protected_job_ids)
+                    if newly_eligible:
+                        self.artifact_registry.mark_gc_eligible(newly_eligible)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error("Error in coordinator background artifact GC loop: %s", exc, exc_info=True)
 
     # ========================================================================
     # Programmatic / Core API Methods
