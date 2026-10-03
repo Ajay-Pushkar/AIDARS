@@ -71,7 +71,7 @@ async def test_timeout_failure_still_reports_execution_duration(tmp_path: Path):
     result = await manager.execute_workload(spec, "w-1", GenericSubprocessRuntime())
 
     assert result.success is False
-    assert result.failure_category == FailureCategory.RESOURCE_EXHAUSTION
+    assert result.failure_category == FailureCategory.EXECUTION_TIMEOUT
     assert result.execution_duration_seconds >= 0.0
     assert "timed out" in (result.stderr_snippet or "")
 

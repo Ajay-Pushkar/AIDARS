@@ -132,6 +132,21 @@ async def test_job_aggregate_reflects_final_attempt_not_every_attempt():
     orchestrator, workload_registry, attempt_registry, job_registry, artifact_registry = (
         _make_full_orchestrator(handler)
     )
+    
+    # Add extra workers so M17.9 exhausted_worker_ids logic can retry on them
+    import time
+    from aidars.distributed.models import WorkerInfo, WorkerStatus, WorkerResourceProfile
+    for wid in ["w-2", "w-3"]:
+        orchestrator.registry.register_worker(WorkerInfo(
+            worker_id=wid, endpoint_url=f"http://{wid}", ip_address="127.0.0.1", port=8001,
+            status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+            resource_profile=WorkerResourceProfile(
+                timestamp_utc=time.time(), worker_id=wid, endpoint_url=f"http://{wid}",
+                ip_address="127.0.0.1", cpu_cores_total=4, cpu_utilization_percent=0.0,
+                ram_total_bytes=16 * 1024**3, ram_available_bytes=16 * 1024**3,
+            ),
+        ))
+
     workload_registry.add_workload(WorkloadSpec(workload_id="task-1", job_id="job-1", task_type="test", min_ram_bytes=1024))
     job_registry.create_job("job-1", {"task-1"}, CompletionPolicy.ALL_REQUIRED)
 
