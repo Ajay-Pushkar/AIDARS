@@ -10,7 +10,7 @@ from aidars.distributed.models import (
     PlacementDecision, WorkloadExecutionResult, WorkloadSpec,
 )
 from aidars.distributed.registry import WorkerRegistry
-from aidars.distributed.workload_registry import WorkloadRecord
+from aidars.distributed.workload_registry import WorkloadRecord, WorkloadState
 from aidars.m12.history import HistoricalObservationProjector
 from aidars.m12.models import DataQualityState, EstimateKind, OutcomeSemantics
 from aidars.m12.service import DistributedIntelligence
@@ -172,3 +172,78 @@ def test_attempt_scoped_placement_provenance_survives_coordinator_replay(tmp_pat
     service._restore_persisted_state()
     assert service.m7_memory.get_workload_state("render").duration_ema.value == first == 2.5
     assert service.m12_intelligence.observations[0].placement_context["selected_worker_id"] == "worker-1"
+
+def test_workload_behavior_classification_labels():
+    """Verify exact boundaries for LONG_RUNNING, SHORT_RUNNING, FAILURE_PRONE, and STABLE."""
+    service = DistributedIntelligence(TelemetryMemory(), WorkerRegistry())
+    record = _record("w-behavior", "test-task")
+
+    # 1. Insufficient history (< 5 samples)
+    service.rebuild_history([record], [_attempt("w-behavior", i, duration=1.0) for i in range(1, 5)])
+    view = service.workload_view(record)
+    assert not view.behavior.labels
+
+    # 2. SHORT_RUNNING (median <= 5)
+    service.rebuild_history([record], [_attempt("w-behavior", i, duration=4.0) for i in range(1, 6)])
+    view = service.workload_view(record)
+    assert "SHORT_RUNNING" in view.behavior.labels
+    assert "LONG_RUNNING" not in view.behavior.labels
+
+    # 3. LONG_RUNNING (median >= 60)
+    service.rebuild_history([record], [_attempt("w-behavior", i, duration=65.0) for i in range(1, 6)])
+    view = service.workload_view(record)
+    assert "LONG_RUNNING" in view.behavior.labels
+
+    # 4. FAILURE_PRONE (failure rate >= 0.3)
+    attempts = [_attempt("w-behavior", i, duration=10.0, outcome="success" if i > 2 else "failure") for i in range(1, 6)]
+    service.rebuild_history([record], attempts)
+    view = service.workload_view(record)
+    assert "FAILURE_PRONE" in view.behavior.labels
+
+    # 5. STABLE (>= 10 samples, rate <= 0.05, mad/median <= 0.2)
+    attempts = [_attempt("w-behavior", i, duration=10.0) for i in range(1, 11)]
+    service.rebuild_history([record], attempts)
+    view = service.workload_view(record)
+    assert "STABLE" in view.behavior.labels
+
+def test_capacity_forecasting_view():
+    """Verify queue pressure calculations and recommendations."""
+    from aidars.distributed.models import WorkerInfo, WorkerStatus, WorkerResourceProfile
+    import time
+    registry = WorkerRegistry()
+    service = DistributedIntelligence(TelemetryMemory(), registry)
+
+    # Add a worker with 4 cores, 4GB RAM
+    profile = WorkerResourceProfile(
+        timestamp_utc=time.time(), worker_id="w-1", endpoint_url="http://w", ip_address="127.0.0.1",
+        cpu_cores_total=4, cpu_utilization_percent=0.0, ram_total_bytes=4*1024**3, ram_available_bytes=4*1024**3
+    )
+    registry.register_worker(WorkerInfo(worker_id="w-1", endpoint_url="http://w", ip_address="127.0.0.1", port=80, status=WorkerStatus.ACTIVE, resource_profile=profile, capacity_bytes=0, used_bytes=0))
+
+    # Create submitted workloads demanding 5 cores (exceeds 4 available)
+    records = []
+    for i in range(5):
+        w = _record(f"queue-{i}")
+        w.spec.min_cpu_cores = 1
+        w.spec.min_ram_bytes = 1024
+        w.state = WorkloadState.SUBMITTED
+        w.submitted_at = time.time()
+        records.append(w)
+
+    forecast = service.capacity_view(records)
+
+    assert forecast.queue_depth == 5
+    assert forecast.pressure == "HIGH"
+    assert forecast.recommendation == "ADD_CAPACITY"
+
+    # Reduce queue to 2 cores (pressure should be NORMAL, but data is insufficient so MONITOR)
+    records[0].state = WorkloadState.COMPLETED
+    records[0].completed_at = time.time()
+    records[1].state = WorkloadState.COMPLETED
+    records[1].completed_at = time.time()
+    records[2].state = WorkloadState.COMPLETED
+    records[2].completed_at = time.time()
+
+    forecast = service.capacity_view(records)
+    assert forecast.pressure == "NORMAL"
+    assert forecast.recommendation == "MONITOR"
