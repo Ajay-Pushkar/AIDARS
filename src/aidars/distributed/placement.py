@@ -133,6 +133,8 @@ class PlacementEngine:
                                                "result": p.vram_available_bytes <= p.vram_total_bytes},
                 "concurrency": {"active": p.active_workload_count, "maximum": p.max_concurrent_workloads,
                                 "result": p.active_workload_count < p.max_concurrent_workloads},
+                "cost": {"required_max": spec.max_cost_per_hour, "actual": p.cost_per_hour,
+                         "result": spec.max_cost_per_hour is None or p.cost_per_hour <= spec.max_cost_per_hour},
             }
             tags = worker_tags.get(p.worker_id, {})
             if spec.required_gpu_vendor:
@@ -195,6 +197,7 @@ class PlacementEngine:
                 "driver_version": "GPU_DRIVER_VERSION_MISMATCH_OR_UNKNOWN",
                 "runtime_compatibility": "GPU_RUNTIME_COMPATIBILITY_UNKNOWN",
                 "required_worker_tags": "REQUIRED_WORKER_TAG_MISMATCH",
+                "cost": "COST_EXCEEDS_BUDGET",
             }
             for name, check in checks.items():
                 if name in ("affinity", "preferred_worker_tags"):
@@ -252,6 +255,8 @@ class PlacementEngine:
                 m11_rank_factors["preferred_worker_tags"] = 0.25 if checks["preferred_worker_tags"]["result"] else 0.0
             if spec.affinity_mode != "none" and not spec.affinity_hard:
                 m11_rank_factors["preferred_affinity"] = 0.25 if affinity_match else -0.25
+            if p.cost_per_hour > 0.0:
+                m11_rank_factors["cost_penalty"] = -float(p.cost_per_hour)
             m11_delta = sum(m11_rank_factors.values())
             eligible.append(p)
             scores[p.worker_id] = m6_score

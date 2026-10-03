@@ -707,6 +707,9 @@ class WorkloadOrchestrator:
                     for unavailable_id in unavailable_group_workers:
                         self.registry.record_failure(unavailable_id, reason="distributed group member unavailable")
                         exhausted_worker_ids.add(unavailable_id)
+                elif result.failure_category == FailureCategory.WORKER_UNAVAILABLE and decision:
+                    exhausted_worker_ids.add(decision.selected_worker_id)
+
                 if should_retry(result.failure_category, attempts_used, self.max_attempts):
                     logger.warning(
                         f"Workload {workload_id} attempt {attempts_used} failed retryably "

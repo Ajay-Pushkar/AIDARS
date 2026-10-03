@@ -285,6 +285,10 @@ class WorkerRegistrationPayload(BaseModel):
     capabilities: WorkerCapabilities = Field(default_factory=WorkerCapabilities)
     inventory_hashes: Set[str] = Field(default_factory=set)
     tags: Dict[str, str] = Field(default_factory=dict)
+    cost_per_hour: float = Field(
+        default=0.0, ge=0.0,
+        description="M17.8: Nominal cost rate of this worker per hour."
+    )
     can_execute_workloads: bool = Field(
         default=True,
         description="Whether this node accepts compute workload placement, or exists purely as a CAS/asset source.",
@@ -361,6 +365,7 @@ class WorkerInfo(BaseModel):
         description="Latest resource telemetry snapshot, timestamped at coordinator receipt and persisted with this worker record.",
     )
     tags: Dict[str, str] = Field(default_factory=dict)
+    cost_per_hour: float = Field(default=0.0, ge=0.0)
     can_execute_workloads: bool = Field(
         default=True,
         description="Whether this node accepts compute workload placement, or exists purely as a CAS/asset source.",
@@ -819,6 +824,10 @@ class WorkloadSpec(BaseModel):
     affinity_mode: Literal["none", "same_worker", "different_worker", "same_tag", "different_tag"] = "none"
     affinity_tag_key: Optional[str] = Field(default=None, max_length=128)
     affinity_hard: bool = True
+    max_cost_per_hour: Optional[float] = Field(
+        default=None, ge=0.0,
+        description="M17.8: Hard constraint on worker cost per hour. Workers exceeding this are ineligible."
+    )
     # Dependency completion is success-only: every listed workload must
     # complete before this workload becomes runnable.
     depends_on: List[str] = Field(default_factory=list, max_length=1000)
@@ -894,6 +903,7 @@ class WorkerResourceProfile(BaseModel):
     max_concurrent_workloads: int = Field(default=10, ge=1)
     status: WorkerStatus = Field(default=WorkerStatus.ACTIVE)
     local_cached_hashes: Set[str] = Field(default_factory=set)
+    cost_per_hour: float = Field(default=0.0, ge=0.0)
     timestamp_utc: Optional[float] = Field(
         default=None,
         description="Telemetry sample or coordinator receipt time; None means freshness is unknown.",
