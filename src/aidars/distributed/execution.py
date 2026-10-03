@@ -67,7 +67,7 @@ class ExecutionManager:
                 output_asset_hashes=set(),
                 execution_duration_seconds=0.0,
                 error_message=f"Failed to create workspace: {exc}",
-                failure_category=FailureCategory.RESOURCE_EXHAUSTION,
+                failure_category=FailureCategory.ASSET_STAGING_FAILURE,
             )
 
         # Write metadata
@@ -100,7 +100,7 @@ class ExecutionManager:
                         execution_duration_seconds=0.0,
                         staging_duration_seconds=time.time() - staging_start,
                         error_message=f"Failed to stage dependency {h}: {exc}",
-                        failure_category=FailureCategory.TEMPORARY_CAS_FAILURE,
+                        failure_category=FailureCategory.ASSET_STAGING_FAILURE,
                     )
 
         if missing_local:
@@ -222,17 +222,17 @@ class ExecutionManager:
             if checkpoint_unsupported_abort:
                 failure_category = FailureCategory.WORKER_UNAVAILABLE
             elif timed_out:
-                failure_category = FailureCategory.RESOURCE_EXHAUSTION
+                failure_category = FailureCategory.EXECUTION_TIMEOUT
             elif ingestion_failed:
                 failure_category = FailureCategory.TEMPORARY_CAS_FAILURE
             elif verification_failed:
-                failure_category = FailureCategory.APPLICATION_ERROR
+                failure_category = FailureCategory.ARTIFACT_VERIFICATION_FAILURE
             else:
                 # Generic runtime exception or non-zero exit: no better
                 # signal is available at this layer, so this is
                 # conservatively classified as an application-level
                 # failure (non-retryable) rather than assumed transient.
-                failure_category = FailureCategory.APPLICATION_ERROR
+                failure_category = FailureCategory.EXECUTION_FAILURE
 
         # 5. Cleanup
         try:

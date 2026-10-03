@@ -165,6 +165,9 @@ class FailureCategory(str, Enum):
     WORKER_UNAVAILABLE = "worker_unavailable"
     TEMPORARY_CAS_FAILURE = "temporary_cas_failure"
     RESOURCE_EXHAUSTION = "resource_exhaustion"
+    EXECUTION_TIMEOUT = "execution_timeout"
+    ASSET_TRANSFER_FAILURE = "asset_transfer_failure"
+    ASSET_STAGING_FAILURE = "asset_staging_failure"
 
     INVALID_INPUT = "invalid_input"
     INVALID_DEPENDENCY = "invalid_dependency"
@@ -173,6 +176,8 @@ class FailureCategory(str, Enum):
     APPLICATION_ERROR = "application_error"
     AUTHORIZATION_FAILURE = "authorization_failure"
     MALFORMED_REQUEST = "malformed_request"
+    ARTIFACT_VERIFICATION_FAILURE = "artifact_verification_failure"
+    EXECUTION_FAILURE = "execution_failure"
 
 
 class TransferState(str, Enum):
@@ -980,6 +985,7 @@ class WorkloadExecutionResult(BaseModel):
     staging_duration_seconds: float = Field(default=0.0, ge=0.0)
     output_ingestion_duration_seconds: float = Field(default=0.0, ge=0.0)
     verification_duration_seconds: float = Field(default=0.0, ge=0.0)
+    transfer_duration_seconds: float = Field(default=0.0, ge=0.0)
 
     @property
     def total_duration_seconds(self) -> float:
@@ -990,4 +996,5 @@ class WorkloadExecutionResult(BaseModel):
             + self.execution_duration_seconds
             + self.output_ingestion_duration_seconds
             + self.verification_duration_seconds
+            + self.transfer_duration_seconds
         )

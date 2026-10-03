@@ -20,6 +20,9 @@ RETRYABLE_FAILURE_CATEGORIES = frozenset({
     FailureCategory.WORKER_UNAVAILABLE,
     FailureCategory.TEMPORARY_CAS_FAILURE,
     FailureCategory.RESOURCE_EXHAUSTION,
+    FailureCategory.EXECUTION_TIMEOUT,
+    FailureCategory.ASSET_TRANSFER_FAILURE,
+    FailureCategory.ASSET_STAGING_FAILURE,
 })
 
 # Non-retryable: the failure is about the WORKLOAD/request itself -- retrying
@@ -32,6 +35,8 @@ NON_RETRYABLE_FAILURE_CATEGORIES = frozenset({
     FailureCategory.APPLICATION_ERROR,
     FailureCategory.AUTHORIZATION_FAILURE,
     FailureCategory.MALFORMED_REQUEST,
+    FailureCategory.ARTIFACT_VERIFICATION_FAILURE,
+    FailureCategory.EXECUTION_FAILURE,
 })
 
 # M10.5: finite retry budget -- no infinite retry loops. 3 total attempts

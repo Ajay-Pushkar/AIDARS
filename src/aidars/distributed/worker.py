@@ -22,6 +22,7 @@ from aidars.distributed.models import (
     CandidateSource,
     HeartbeatPayload,
     HeartbeatResponse,
+    FailureCategory,
     LocateAssetsResponse,
     TransferResult,
     WorkerCapabilities,
@@ -431,6 +432,7 @@ class DistributedWorker:
         logger.info("Worker %s executing workload %s", self.worker_id, spec.workload_id)
         
         # 1. Sync dependencies with SingleFlight deduplication per asset
+        transfer_start = time.time()
         if spec.input_asset_hashes:
             # For simplicity, we just sync the whole set at once, but we could wrap 
             # each hash in single_flight.run. The DistributedClient manages concurrency.
@@ -443,6 +445,7 @@ class DistributedWorker:
                 operation=_sync
             )
             
+            transfer_duration = time.time() - transfer_start
             for h, res in sync_results.items():
                 if not res.success:
                     return WorkloadExecutionResult(
@@ -451,8 +454,12 @@ class DistributedWorker:
                         success=False,
                         output_asset_hashes=set(),
                         execution_duration_seconds=0.0,
+                        transfer_duration_seconds=transfer_duration,
                         error_message=f"Failed to sync dependency {h}: {res.error_message}",
+                        failure_category=FailureCategory.ASSET_TRANSFER_FAILURE,
                     )
+        else:
+            transfer_duration = time.time() - transfer_start
 
         # 2. Setup runtime and execute
         runtime = GenericSubprocessRuntime()
@@ -462,5 +469,6 @@ class DistributedWorker:
             runtime=runtime,
             execution_context=execution_context,
         )
+        result.transfer_duration_seconds = transfer_duration
         
         return result
