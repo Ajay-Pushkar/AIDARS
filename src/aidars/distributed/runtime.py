@@ -7,6 +7,8 @@ import abc
 import asyncio
 import json
 import os
+import psutil
+import platform
 from typing import Any, Dict, Optional, Tuple
 
 from aidars.distributed.models import RuntimeExecutionContext, WorkloadSpec
@@ -47,6 +49,11 @@ class RuntimeAdapter(abc.ABC):
         """Trigger a graceful checkpoint and halt execution."""
         pass
 
+    @abc.abstractmethod
+    async def cancel(self) -> None:
+        """Forcefully or gracefully terminate the running execution."""
+        pass
+
     async def execute_with_context(
         self, spec: WorkloadSpec, workdir: str,
         context: Optional[RuntimeExecutionContext] = None,
@@ -70,6 +77,7 @@ class GenericSubprocessRuntime(RuntimeAdapter):
     def __init__(self):
         self._process: Optional[asyncio.subprocess.Process] = None
         self._checkpoint_requested: bool = False
+        self._cancel_requested: bool = False
 
     async def execute(
         self, spec: WorkloadSpec, workdir: str
@@ -84,23 +92,43 @@ class GenericSubprocessRuntime(RuntimeAdapter):
 
     async def _execute(self, spec: WorkloadSpec, workdir: str,
                        context: Optional[RuntimeExecutionContext]) -> Tuple[bool, Optional[str], Optional[str]]:
-        """Executes a command based on the task_type or parameters."""
-        command = spec.parameters.get("command")
-        if not command:
-            return False, None, "No command specified in parameters"
-
+        """Executes a command using structured argv or legacy shell string."""
+        
+        environment = None
+        if context is not None:
+            environment = os.environ.copy()
+            environment["AIDAR_EXECUTION_CONTEXT"] = json.dumps(context.model_dump(mode="json"))
+            
         try:
-            environment = None
-            if context is not None:
-                environment = os.environ.copy()
-                environment["AIDAR_EXECUTION_CONTEXT"] = json.dumps(context.model_dump(mode="json"))
-            self._process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=workdir,
-                env=environment,
-            )
+            if spec.execution_spec:
+                # M19.3: Secure structured execution
+                exec_spec = spec.execution_spec
+                env = os.environ.copy() if environment is None else environment
+                if exec_spec.env:
+                    env.update(exec_spec.env)
+                
+                cwd = exec_spec.cwd or workdir
+                self._process = await asyncio.create_subprocess_exec(
+                    exec_spec.executable,
+                    *exec_spec.args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                )
+            else:
+                # Legacy fallback
+                command = spec.parameters.get("command")
+                if not command:
+                    return False, None, "No execution_spec or command specified in workload parameters"
+
+                self._process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=workdir,
+                    env=environment,
+                )
             
             # Wait for completion, enforcing the hard timeout at the ExecutionManager level
             stdout_bytes, stderr_bytes = await self._process.communicate()
@@ -113,18 +141,36 @@ class GenericSubprocessRuntime(RuntimeAdapter):
             stdout_snippet = stdout[-1000:] if stdout else None
             stderr_snippet = stderr[-1000:] if stderr else None
             
+            if self._cancel_requested:
+                return False, stdout_snippet, "Execution cancelled by request"
+                
             return success, stdout_snippet, stderr_snippet
             
         except Exception as exc:
             if self._checkpoint_requested:
                 return True, None, "Checkpointed"
+            if self._cancel_requested:
+                return False, None, "Cancelled"
             return False, None, f"Execution failed: {exc}"
             
     async def checkpoint(self) -> None:
         """Terminate the subprocess gracefully for checkpointing."""
         self._checkpoint_requested = True
+        self._terminate_process_tree()
+
+    async def cancel(self) -> None:
+        """Cancel the subprocess gracefully then forcefully if needed."""
+        self._cancel_requested = True
+        self._terminate_process_tree()
+
+    def _terminate_process_tree(self):
         if self._process and self._process.returncode is None:
             try:
-                self._process.terminate()
-            except ProcessLookupError:
+                pid = self._process.pid
+                parent = psutil.Process(pid)
+                children = parent.children(recursive=True)
+                for child in children:
+                    child.terminate()
+                parent.terminate()
+            except (psutil.NoSuchProcess, ProcessLookupError):
                 pass

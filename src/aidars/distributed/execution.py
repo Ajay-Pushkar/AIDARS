@@ -267,3 +267,12 @@ class ExecutionManager:
             await runtime.checkpoint()
             return True
         return False
+
+    async def cancel_workload(self, workload_id: str) -> bool:
+        """Forcefully cancel a running workload."""
+        runtime = self.active_runtimes.get(workload_id)
+        if runtime:
+            await runtime.cancel()
+            return True
+        return False
+

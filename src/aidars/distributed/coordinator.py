@@ -1222,5 +1222,84 @@ class CoordinatorService:
                 "size_bytes": artifact.size_bytes,
             }
 
+        @router.get(
+            "/jobs/{job_id}/workloads",
+            status_code=status.HTTP_200_OK,
+            summary="Paginate workloads for a Job",
+            dependencies=[Depends(require_admin)],
+        )
+        async def get_job_workloads(job_id: str, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
+            job = self.job_registry.get_job(job_id)
+            if not job:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found.")
+            # Fetch all workloads for job and paginate
+            workloads = [self.workload_registry.get_workload(wid) for wid in job.workload_ids]
+            workloads = [w for w in workloads if w is not None]
+            workloads.sort(key=lambda w: w.spec.workload_id)
+            total = len(workloads)
+            items = workloads[offset:offset+limit]
+            has_more = offset + limit < total
+            return {
+                "items": [{"workload_id": w.spec.workload_id, "state": w.state.value} for w in items],
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "has_more": has_more
+            }
+
+        @router.get(
+            "/jobs/{job_id}/artifacts",
+            status_code=status.HTTP_200_OK,
+            summary="Paginate artifacts for a Job",
+            dependencies=[Depends(require_admin)],
+        )
+        async def get_job_artifacts(job_id: str, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
+            job = self.job_registry.get_job(job_id)
+            if not job:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found.")
+            # Artifacts belong to workloads in the job
+            all_artifacts = self.artifact_registry.list_artifacts()
+            job_artifacts = [a for a in all_artifacts if a.producer_job_id == job_id]
+            job_artifacts.sort(key=lambda a: a.artifact_id)
+            total = len(job_artifacts)
+            items = job_artifacts[offset:offset+limit]
+            has_more = offset + limit < total
+            return {
+                "items": [{
+                    "artifact_id": a.artifact_id,
+                    "content_hash": a.content_hash,
+                    "size_bytes": a.size_bytes,
+                    "verification_state": a.verification_state.value
+                } for a in items],
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "has_more": has_more
+            }
+
+        @router.post(
+            "/jobs/{job_id}/cancel",
+            status_code=status.HTTP_200_OK,
+            summary="Cancel a running job",
+            dependencies=[Depends(require_admin)],
+        )
+        async def cancel_job_endpoint(job_id: str) -> Dict[str, Any]:
+            success = await self.orchestrator.cancel_job(job_id)
+            if not success:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found or could not be cancelled.")
+            return {"job_id": job_id, "status": "cancelled"}
+
+        @router.get(
+            "/attempts/{attempt_id}",
+            status_code=status.HTTP_200_OK,
+            summary="Get specific attempt details",
+            dependencies=[Depends(require_admin)],
+        )
+        async def get_attempt_status(attempt_id: str) -> Dict[str, Any]:
+            attempt = self.attempt_registry.get_attempt(attempt_id)
+            if not attempt:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Attempt '{attempt_id}' not found.")
+            return attempt.to_summary_dict()
+
         app.include_router(router)
         return app

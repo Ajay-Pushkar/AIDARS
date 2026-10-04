@@ -36,6 +36,8 @@ class WorkloadState(str, Enum):
     FAILED = "failed"
     TIMEOUT = "timeout"
     UNSCHEDULABLE = "unschedulable"
+    CANCELLATION_REQUESTED = "cancellation_requested"
+    CANCELLED = "cancelled"
 
 
 # Phase 5.2C: states a recovered workload must NOT be re-driven from,
@@ -47,6 +49,7 @@ TERMINAL_WORKLOAD_STATES = frozenset({
     WorkloadState.COMPLETED,
     WorkloadState.FAILED,
     WorkloadState.UNSCHEDULABLE,
+    WorkloadState.CANCELLED,
 })
 
 

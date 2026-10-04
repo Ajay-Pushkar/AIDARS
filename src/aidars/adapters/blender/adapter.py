@@ -1,7 +1,7 @@
 import uuid
 from typing import Any, List, Dict, Optional
 from aidars.adapters.base import ApplicationAdapter
-from aidars.distributed.models import WorkloadSpec
+from aidars.distributed.models import WorkloadSpec, ExecutionSpec, OutputVerificationPolicy
 from aidars.adapters.blender.intelligence.scene_engine import SceneEngine
 from aidars.core.assets.manager import AssetManager
 
@@ -15,6 +15,13 @@ class BlenderAdapter(ApplicationAdapter):
         # WorkloadSpec.input_asset_hashes; it just has no legitimate CAS to
         # ingest into, so it doesn't fabricate one.
         self.asset_manager = asset_manager
+
+    def validate(self, request: dict) -> bool:
+        """Validate Blender specific request."""
+        input_path = request.get("input_path")
+        if not input_path:
+            return False
+        return True
 
     def evaluate_request(self, request: dict) -> List[WorkloadSpec]:
         """Parse Blender request, discover dependencies, and output WorkloadSpecs.
@@ -104,13 +111,14 @@ class BlenderAdapter(ApplicationAdapter):
                 "job_frame_end": frame_end,
             }
             
-            # M14.6: Populate the 'command' parameter for GenericSubprocessRuntime.
-            # ExecutionManager stages the file at 'inputs/{hash}' and runs with cwd=workdir.
-            # Blender will output to 'outputs/' which ExecutionManager scans for artifacts.
+            # Store hash for execution spec builder
             if input_file_hash:
+                params["input_file_hash"] = input_file_hash
+                # M14.6: Populate the 'command' parameter for GenericSubprocessRuntime.
+                # Kept for backward compatibility until M19.3 migrates to ExecutionSpec.
                 params["command"] = (
                     f"blender -b inputs/{input_file_hash} "
-                    f"-o outputs/frame_#### "
+                    f"-o //../outputs/frame_#### "
                     f"-s {chunk.frame_start} -e {chunk.frame_end} -a"
                 )
 
@@ -130,9 +138,27 @@ class BlenderAdapter(ApplicationAdapter):
 
         return specs
         
-    def collect_outputs(self, spec: WorkloadSpec, workspace: Any) -> Any:
-        """Interpret workload outputs from the generic runtime."""
-        # Invokes M1/M2/M3 logic to interpret outputs
-        return {
-            "result": f"Blender workload {spec.workload_id} outputs interpreted."
-        }
+    def build_execution_spec(self, workload: WorkloadSpec) -> ExecutionSpec:
+        input_file_hash = workload.parameters.get("input_file_hash")
+        if not input_file_hash:
+            raise ValueError("Blender workload missing input_file_hash")
+        
+        args = [
+            "-b", f"inputs/{input_file_hash}",
+            "-o", "//../outputs/frame_####",
+            "-s", str(workload.parameters["frame_start"]),
+            "-e", str(workload.parameters["frame_end"]),
+            "-a"
+        ]
+        return ExecutionSpec(
+            executable="blender",
+            args=args,
+            env={},
+            cwd=None,
+            timeout_seconds=workload.estimated_duration_seconds * 3.0
+        )
+
+    def describe_expected_outputs(self, workload: WorkloadSpec) -> OutputVerificationPolicy:
+        return OutputVerificationPolicy(
+            expected_output_count=workload.parameters.get("expected_output_count")
+        )

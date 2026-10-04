@@ -422,6 +422,11 @@ class DistributedWorker:
         logger.info("Worker %s received checkpoint request for workload %s", self.worker_id, workload_id)
         return await self.execution_manager.checkpoint_workload(workload_id)
 
+    async def cancel_workload(self, workload_id: str) -> bool:
+        """Request the ExecutionManager to gracefully cancel an active workload."""
+        logger.info("Worker %s received cancel request for workload %s", self.worker_id, workload_id)
+        return await self.execution_manager.cancel_workload(workload_id)
+
     # ========================================================================
     # Workload Execution
     # ========================================================================

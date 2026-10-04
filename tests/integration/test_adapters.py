@@ -46,9 +46,11 @@ def test_blender_adapter_produces_generic_workload():
     assert specs[0].task_type == "blender_render"
     assert specs[0].requires_gpu is True
     assert specs[0].min_ram_bytes > 0
-    # M14.6: command generation
-    assert "command" in specs[0].parameters
-    assert specs[0].parameters["command"].startswith("blender -b inputs/")
+    # M14.6: execution spec generation
+    exec_spec = adapter.build_execution_spec(specs[0])
+    assert exec_spec.executable == "blender"
+    assert exec_spec.args[0] == "-b"
+    assert exec_spec.args[1].startswith("inputs/")
 
 def test_llm_adapter_produces_generic_workload():
     adapter = LLMAdapter()

@@ -55,6 +55,9 @@ class _FakeCheckpointCapableRuntime(RuntimeAdapter):
     async def checkpoint(self) -> None:
         self._checkpoint_requested = True
 
+    async def cancel(self) -> None:
+        pass
+
 
 # ============================================================================
 # execution.py capability gating

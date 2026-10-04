@@ -22,7 +22,7 @@ from aidars.distributed.models import (
 from aidars.distributed.placement import PlacementEngine
 from aidars.distributed.registry import WorkerRegistry
 from aidars.distributed.retry import DEFAULT_MAX_ATTEMPTS, should_retry
-from aidars.distributed.workload_registry import WorkloadRegistry, WorkloadState
+from aidars.distributed.workload_registry import WorkloadRegistry, WorkloadState, TERMINAL_WORKLOAD_STATES
 
 logger = logging.getLogger(__name__)
 
@@ -979,3 +979,50 @@ class WorkloadOrchestrator:
 
         for wid in active_workloads:
             await checkpoint_member(worker_id, wid)
+
+    async def cancel_workload(self, workload_id: str) -> bool:
+        """Cancel a workload and terminate its execution if running."""
+        record = self.workload_registry.get_workload(workload_id)
+        if not record:
+            return False
+
+        if record.state in TERMINAL_WORKLOAD_STATES:
+            return True
+
+        if record.state in (WorkloadState.EXECUTING, WorkloadState.SYNCING_ASSETS):
+            # Attempt to cancel on the worker
+            attempt = self.attempt_registry.get_active_attempt(workload_id)
+            if attempt and attempt.worker_id:
+                worker = self.registry.get_worker(attempt.worker_id)
+                if worker:
+                    client = getattr(self, "http_client", None) or httpx.AsyncClient()
+                    try:
+                        await client.post(
+                            f"{worker.endpoint_url}/api/v1/workloads/{workload_id}/cancel",
+                            timeout=5.0,
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to reach worker %s to cancel workload %s: %s", worker.worker_id, workload_id, exc)
+
+        self.workload_registry.update_state(
+            workload_id,
+            WorkloadState.CANCELLED,
+            error_message="Execution cancelled by user request",
+        )
+        self._queued_ids.discard(workload_id)
+        return True
+
+    async def cancel_job(self, job_id: str) -> bool:
+        """Cancel all active workloads for a job."""
+        job = self.job_registry.get_job(job_id)
+        if not job:
+            return False
+
+        success = True
+        for wid in job.workload_ids:
+            if not await self.cancel_workload(wid):
+                success = False
+
+        # Job aggregate state handles evaluating WorkloadState.CANCELLED as failed/cancelled
+        return success
+

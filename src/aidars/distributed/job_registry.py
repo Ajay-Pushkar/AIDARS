@@ -61,7 +61,7 @@ class JobState(str, Enum):
 
 
 # Workload states this module buckets as "the workload is done trying".
-_FAILED_WORKLOAD_STATES = frozenset({WorkloadState.FAILED, WorkloadState.UNSCHEDULABLE})
+_FAILED_WORKLOAD_STATES = frozenset({WorkloadState.FAILED, WorkloadState.UNSCHEDULABLE, WorkloadState.CANCELLED})
 # Every WorkloadState.* live code actually assigns (see workload_registry.TERMINAL_WORKLOAD_STATES
 # and workload.py) minus the ones already covered above/below -- kept explicit rather than
 # "everything not COMPLETED/FAILED/UNSCHEDULABLE" so a newly-reachable state added later must be
@@ -70,7 +70,8 @@ _PENDING_WORKLOAD_STATES = frozenset({
     WorkloadState.SUBMITTED, WorkloadState.VALIDATING, WorkloadState.PLACING,
 })
 _RUNNING_WORKLOAD_STATES = frozenset({
-    WorkloadState.PLACED, WorkloadState.MIGRATING,
+    WorkloadState.PLACED, WorkloadState.MIGRATING, WorkloadState.EXECUTING, 
+    WorkloadState.SYNCING_ASSETS, WorkloadState.INGESTING, WorkloadState.CANCELLATION_REQUESTED
 })
 
 

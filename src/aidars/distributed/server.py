@@ -266,6 +266,15 @@ class WorkerServer:
                 raise HTTPException(status_code=404, detail="Workload not found or could not be checkpointed")
             return {"status": "checkpointing"}
 
+        @router.post("/api/v1/workloads/{workload_id}/cancel")
+        async def cancel_workload_endpoint(workload_id: str) -> Dict[str, Any]:
+            if not self.distributed_worker:
+                raise HTTPException(status_code=500, detail="Worker instance not linked to server")
+            success = await self.distributed_worker.cancel_workload(workload_id)
+            if not success:
+                raise HTTPException(status_code=404, detail="Workload not found or could not be cancelled")
+            return {"status": "cancelled"}
+
         app.include_router(router)
         return app
 

@@ -303,6 +303,9 @@ async def test_worker_metadata_redacts_secret_parameters_but_keeps_safe_metadata
         async def checkpoint(self):
             return None
 
+        async def cancel(self):
+            pass
+
     spec = _spec("metadata-check", parameters={
         "tile_count": 6,
         "password": "live-secret",

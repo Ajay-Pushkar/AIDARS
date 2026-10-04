@@ -692,6 +692,28 @@ class ClusterTelemetry(BaseModel):
 # M6 Workload & Execution Models
 # ============================================================================
 
+
+class ExecutionSpec(BaseModel):
+    """Structured, secure execution parameters replacing shell commands."""
+    
+    model_config = ConfigDict(extra="ignore")
+    
+    executable: str = Field(..., min_length=1)
+    args: List[str] = Field(default_factory=list)
+    env: Dict[str, str] = Field(default_factory=dict)
+    cwd: Optional[str] = Field(default=None)
+    timeout_seconds: Optional[float] = Field(default=None, gt=0)
+
+
+class OutputVerificationPolicy(BaseModel):
+    """Declarative expectations for workload outputs independent of the runtime."""
+    
+    model_config = ConfigDict(extra="ignore")
+    
+    expected_output_count: Optional[int] = Field(default=None, ge=1)
+    expected_extensions: Optional[List[str]] = Field(default=None)
+
+
 class ExecutionShape(str, Enum):
     """Generic execution arrangement declared by an application submission."""
 
@@ -832,6 +854,7 @@ class WorkloadSpec(BaseModel):
     # complete before this workload becomes runnable.
     depends_on: List[str] = Field(default_factory=list, max_length=1000)
     parameters: Dict[str, Any] = Field(default_factory=dict)
+    execution_spec: Optional["ExecutionSpec"] = Field(default=None)
 
     @field_validator("input_asset_hashes")
     @classmethod
