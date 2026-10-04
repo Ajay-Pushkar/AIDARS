@@ -63,7 +63,11 @@ class RuntimeAdapter(abc.ABC):
 
 
 class GenericSubprocessRuntime(RuntimeAdapter):
-    """A generic runtime that executes a script or command.
+    """A generic runtime that executes a script or command using structured execution.
+
+    SECURITY NOTE: This runtime provides OS-level process execution, not full container isolation.
+    While it uses structured argv execution to mitigate shell injection, it does not sandbox the
+    underlying file system, network, or kernel resources.
 
     supports_checkpointing is explicitly False: checkpoint() below only
     terminates the subprocess -- it does not preserve any process state
