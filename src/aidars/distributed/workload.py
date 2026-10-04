@@ -456,14 +456,22 @@ class WorkloadOrchestrator:
                 for attempt in attempt_records
                 if(
                     attempt.worker_id is not None
-                    and attempt.failure_category == FailureCategory.WORKER_UNAVAILABLE
+                    and attempt.failure_category in (
+                        FailureCategory.WORKER_UNAVAILABLE,
+                        FailureCategory.ASSET_STAGING_FAILURE,
+                        FailureCategory.EXECUTION_TIMEOUT,
+                    )
                     and attempt.status != AttemptStatus.LOST
                 )
             }
             exhausted_worker_ids.update(
                 worker_id
                 for attempt in attempt_records
-                if attempt.failure_category == FailureCategory.WORKER_UNAVAILABLE
+                if attempt.failure_category in (
+                    FailureCategory.WORKER_UNAVAILABLE,
+                    FailureCategory.ASSET_STAGING_FAILURE,
+                    FailureCategory.EXECUTION_TIMEOUT,
+                )
                 and attempt.execution_group is not None
                 for worker_id in attempt.execution_group.unavailable_worker_ids
             )
@@ -707,7 +715,11 @@ class WorkloadOrchestrator:
                     for unavailable_id in unavailable_group_workers:
                         self.registry.record_failure(unavailable_id, reason="distributed group member unavailable")
                         exhausted_worker_ids.add(unavailable_id)
-                elif result.failure_category == FailureCategory.WORKER_UNAVAILABLE and decision:
+                elif result.failure_category in (
+                    FailureCategory.WORKER_UNAVAILABLE,
+                    FailureCategory.ASSET_STAGING_FAILURE,
+                    FailureCategory.EXECUTION_TIMEOUT,
+                ) and decision:
                     exhausted_worker_ids.add(decision.selected_worker_id)
 
                 if should_retry(result.failure_category, attempts_used, self.max_attempts):

@@ -17,6 +17,7 @@ from aidars.distributed.models import (
     WorkerStatus,
     WorkloadExecutionResult,
     WorkloadSpec,
+    PlacementDecision,
 )
 from aidars.distributed.registry import WorkerRegistry
 from aidars.distributed.retry import DEFAULT_MAX_ATTEMPTS
@@ -327,3 +328,116 @@ async def test_placement_recovery_retries_a_different_worker_after_dispatch_fail
     assert attempts[0].status == AttemptStatus.FAILED
     assert attempts[1].worker_id == "worker-c"
     assert attempts[1].status == AttemptStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_placement_recovery_retries_a_different_worker_after_execution_timeout():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "worker-b" in str(request.url):
+            return httpx.Response(200, json=_failed_result("task-1", FailureCategory.EXECUTION_TIMEOUT).model_dump(mode="json"))
+        return httpx.Response(200, json=_success_result("task-1").model_dump(mode="json"))
+
+    registry = WorkerRegistry()
+    workload_registry = WorkloadRegistry()
+    attempt_registry = AttemptRegistry()
+    orchestrator = WorkloadOrchestrator(
+        registry=registry, workload_registry=workload_registry, attempt_registry=attempt_registry,
+    )
+    registry.register_worker(WorkerInfo(
+        worker_id="worker-b", endpoint_url="http://worker-b", ip_address="1.1.1.1", port=8001,
+        status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("worker-b", "http://worker-b", "1.1.1.1"),
+    ))
+    registry.register_worker(WorkerInfo(
+        worker_id="worker-c", endpoint_url="http://worker-c", ip_address="2.2.2.2", port=8002,
+        status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("worker-c", "http://worker-c", "2.2.2.2"),
+    ))
+    orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    workload_registry.add_workload(WorkloadSpec(workload_id="task-1", task_type="test", min_ram_bytes=1024))
+
+    await orchestrator._process_workload("task-1")
+
+    record = workload_registry.get_workload("task-1")
+    assert record.state == WorkloadState.COMPLETED
+    assert record.placement_decision.selected_worker_id == "worker-c"
+
+
+@pytest.mark.asyncio
+async def test_placement_recovery_retries_a_different_worker_after_asset_staging_failure():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "worker-b" in str(request.url):
+            return httpx.Response(200, json=_failed_result("task-1", FailureCategory.ASSET_STAGING_FAILURE).model_dump(mode="json"))
+        return httpx.Response(200, json=_success_result("task-1").model_dump(mode="json"))
+
+    registry = WorkerRegistry()
+    workload_registry = WorkloadRegistry()
+    attempt_registry = AttemptRegistry()
+    orchestrator = WorkloadOrchestrator(
+        registry=registry, workload_registry=workload_registry, attempt_registry=attempt_registry,
+    )
+    registry.register_worker(WorkerInfo(
+        worker_id="worker-b", endpoint_url="http://worker-b", ip_address="1.1.1.1", port=8001,
+        status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("worker-b", "http://worker-b", "1.1.1.1"),
+    ))
+    registry.register_worker(WorkerInfo(
+        worker_id="worker-c", endpoint_url="http://worker-c", ip_address="2.2.2.2", port=8002,
+        status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("worker-c", "http://worker-c", "2.2.2.2"),
+    ))
+    orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    workload_registry.add_workload(WorkloadSpec(workload_id="task-1", task_type="test", min_ram_bytes=1024))
+
+    await orchestrator._process_workload("task-1")
+
+    record = workload_registry.get_workload("task-1")
+    assert record.state == WorkloadState.COMPLETED
+    assert record.placement_decision.selected_worker_id == "worker-c"
+
+
+@pytest.mark.asyncio
+async def test_placement_recovery_preserves_hard_affinity_after_failure():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_failed_result("task-2", FailureCategory.ASSET_STAGING_FAILURE).model_dump(mode="json"))
+
+    registry = WorkerRegistry()
+    workload_registry = WorkloadRegistry()
+    attempt_registry = AttemptRegistry()
+    orchestrator = WorkloadOrchestrator(
+        registry=registry, workload_registry=workload_registry, attempt_registry=attempt_registry, max_attempts=2
+    )
+    registry.register_worker(WorkerInfo(
+        worker_id="worker-b", endpoint_url="http://worker-b", ip_address="1.1.1.1", port=8001,
+        status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("worker-b", "http://worker-b", "1.1.1.1"),
+    ))
+    registry.register_worker(WorkerInfo(
+        worker_id="worker-c", endpoint_url="http://worker-c", ip_address="2.2.2.2", port=8002,
+        status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("worker-c", "http://worker-c", "2.2.2.2"),
+    ))
+    orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    # Task 1 creates the affinity anchor on worker-b
+    anchor_spec = WorkloadSpec(workload_id="task-1", task_type="test", min_ram_bytes=1024, affinity_group_id="group-1")
+    workload_registry.add_workload(anchor_spec)
+    decision = PlacementDecision(
+        workload_id="task-1", selected_worker_id="worker-b", placement_score=1.0, score_breakdown={},
+        missing_assets_on_worker=set(), execution_tier="lan", decision_timestamp_utc=0.0, candidate_explanations=[], m7_ranking_adjustments={}, locality_details={}
+    )
+    workload_registry.set_placement("task-1", decision)
+
+    # Task 2 is bound to the same worker
+    workload_registry.add_workload(WorkloadSpec(workload_id="task-2", task_type="test", min_ram_bytes=1024, affinity_group_id="group-1", affinity_mode="same_worker", affinity_hard=True))
+    await orchestrator._process_workload("task-2")
+
+    record = workload_registry.get_workload("task-2")
+    # It must remain SUBMITTED rather than migrating to worker-c, because hard affinity to worker-b is unfulfilled
+    assert record.state == WorkloadState.SUBMITTED
+    assert "Waiting for an eligible worker" in record.error_message
+
+    attempts = attempt_registry.list_attempts_for_workload("task-2")
+    # Only 1 attempt actually got placed before the retry loop blocked the second attempt
+    assert len(attempts) == 1
+    assert attempts[0].worker_id == "worker-b"
