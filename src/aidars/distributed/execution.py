@@ -120,7 +120,10 @@ class ExecutionManager:
         staging_duration = time.time() - staging_start
 
         # 3. Execute with Timeout
-        timeout_seconds = spec.estimated_duration_seconds * 3.0
+        if spec.execution_spec and spec.execution_spec.timeout_seconds is not None:
+            timeout_seconds = float(spec.execution_spec.timeout_seconds)
+        else:
+            timeout_seconds = spec.estimated_duration_seconds * 3.0
         start_time = time.time()
 
         self.active_runtimes[workload_id] = runtime
