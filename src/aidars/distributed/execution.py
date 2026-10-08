@@ -119,26 +119,45 @@ class ExecutionManager:
             )
         staging_duration = time.time() - staging_start
 
-        # 3. Execute with Timeout
-        if spec.execution_spec and spec.execution_spec.timeout_seconds is not None:
-            timeout_seconds = float(spec.execution_spec.timeout_seconds)
-        else:
-            timeout_seconds = spec.estimated_duration_seconds * 3.0
+        # 3. Execute with the explicit workload timeout only. An omitted
+        # timeout is intentionally unbounded; estimated_duration_seconds is
+        # scheduling/prediction data and must never become an execution
+        # deadline.
+        timeout_seconds = (
+            float(spec.execution_spec.timeout_seconds)
+            if spec.execution_spec and spec.execution_spec.timeout_seconds is not None
+            else None
+        )
         start_time = time.time()
 
         self.active_runtimes[workload_id] = runtime
 
         timed_out = False
+        cancelled = False
         runtime_exception: Optional[BaseException] = None
         try:
             success, stdout_snip, stderr_snip = await asyncio.wait_for(
                 runtime.execute_with_context(spec, workdir, execution_context), timeout=timeout_seconds
             )
         except asyncio.TimeoutError:
+            # wait_for cancels the runtime coroutine. The subprocess itself
+            # is not guaranteed to die from coroutine cancellation, so use
+            # the public runtime contract before cleanup.
+            await runtime.cancel()
             success = False
             stdout_snip = None
             stderr_snip = f"Execution timed out after {timeout_seconds} seconds"
             timed_out = True
+        except asyncio.CancelledError:
+            # Worker/task cancellation is distinct from an execution timeout,
+            # but must still terminate the underlying process before cleanup.
+            cancelled = True
+            try:
+                await runtime.cancel()
+            finally:
+                success = False
+                stdout_snip = None
+                stderr_snip = "Execution cancelled by request"
         except Exception as exc:
             success = False
             stdout_snip = None
@@ -174,7 +193,7 @@ class ExecutionManager:
         output_sizes: Dict[str, int] = {}
         ingestion_start = time.time()
         ingestion_failed = False
-        if success:
+        if success and not cancelled:
             try:
                 for root, _, files in os.walk(outputs_dir):
                     for filename in files:
@@ -230,6 +249,8 @@ class ExecutionManager:
                 failure_category = FailureCategory.TEMPORARY_CAS_FAILURE
             elif verification_failed:
                 failure_category = FailureCategory.ARTIFACT_VERIFICATION_FAILURE
+            elif cancelled:
+                failure_category = FailureCategory.EXECUTION_FAILURE
             else:
                 # Generic runtime exception or non-zero exit: no better
                 # signal is available at this layer, so this is

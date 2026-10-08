@@ -44,12 +44,8 @@ async def test_explicit_timeout_overrides_estimated_duration(tmp_path: Path):
     assert t1 - t0 >= 0.2
     assert result.failure_category is None
 
-async def test_omitted_timeout_seconds_uses_fallback(tmp_path: Path):
-    """
-    If execution_spec.timeout_seconds is omitted, it falls back to
-    estimated_duration_seconds * 3.0.
-    With estimated_duration_seconds=0.05 (fallback=0.15s), a 0.5s sleep should timeout.
-    """
+async def test_omitted_timeout_seconds_runs_to_completion(tmp_path: Path):
+    """An omitted execution timeout means natural completion, regardless of estimate."""
     cas = LocalCASAdapter(cas_dir=tmp_path / "cas")
     manager = ExecutionManager(cas_adapter=cas, workloads_dir=str(tmp_path / "workloads"))
     
@@ -66,9 +62,8 @@ async def test_omitted_timeout_seconds_uses_fallback(tmp_path: Path):
     
     result = await manager.execute_workload(spec, "w-1", GenericSubprocessRuntime())
     
-    assert result.success is False
-    assert result.failure_category == FailureCategory.EXECUTION_TIMEOUT
-    assert "timed out after 0.15" in (result.stderr_snippet or "")
+    assert result.success is True
+    assert result.failure_category is None
 
 async def test_timeout_expiry_with_explicit_timeout(tmp_path: Path):
     """
@@ -89,16 +84,16 @@ async def test_timeout_expiry_with_explicit_timeout(tmp_path: Path):
         )
     )
     
-    result = await manager.execute_workload(spec, "w-1", GenericSubprocessRuntime())
+    runtime = GenericSubprocessRuntime()
+    result = await manager.execute_workload(spec, "w-1", runtime)
     
     assert result.success is False
     assert result.failure_category == FailureCategory.EXECUTION_TIMEOUT
     assert "timed out after 0.1 seconds" in (result.stderr_snippet or "")
+    assert runtime._process.returncode is not None
 
-async def test_legacy_workload_without_execution_spec_uses_fallback(tmp_path: Path):
-    """
-    If there is no execution_spec at all (only parameters.command), it should fallback.
-    """
+async def test_legacy_workload_without_execution_spec_runs_to_completion(tmp_path: Path):
+    """Legacy command workloads also have no implicit execution deadline."""
     cas = LocalCASAdapter(cas_dir=tmp_path / "cas")
     manager = ExecutionManager(cas_adapter=cas, workloads_dir=str(tmp_path / "workloads"))
     
@@ -111,9 +106,8 @@ async def test_legacy_workload_without_execution_spec_uses_fallback(tmp_path: Pa
     
     result = await manager.execute_workload(spec, "w-1", GenericSubprocessRuntime())
     
-    assert result.success is False
-    assert result.failure_category == FailureCategory.EXECUTION_TIMEOUT
-    assert "timed out after 0.15" in (result.stderr_snippet or "")
+    assert result.success is True
+    assert result.failure_category is None
 
 async def test_cancellation_still_works_with_explicit_timeout(tmp_path: Path):
     """

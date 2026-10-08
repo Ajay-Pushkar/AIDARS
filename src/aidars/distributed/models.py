@@ -705,6 +705,33 @@ class ExecutionSpec(BaseModel):
     timeout_seconds: Optional[float] = Field(default=None, gt=0)
 
 
+class ExecutionSubmitRequest(BaseModel):
+    """Control-plane request for an idempotent worker execution submission."""
+
+    attempt_id: str = Field(..., min_length=1)
+    spec: "WorkloadSpec"
+    execution_context: Optional[RuntimeExecutionContext] = None
+
+
+class ExecutionState(str, Enum):
+    """Worker-side lifecycle of one attempt keyed by attempt_id."""
+
+    ACCEPTED = "accepted"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ExecutionStatus(BaseModel):
+    """Small, pollable worker execution status/result envelope."""
+
+    attempt_id: str
+    workload_id: str
+    state: ExecutionState
+    result: Optional["WorkloadExecutionResult"] = None
+
+
 class OutputVerificationPolicy(BaseModel):
     """Declarative expectations for workload outputs independent of the runtime."""
     
@@ -1031,3 +1058,8 @@ class WorkloadExecutionResult(BaseModel):
             + self.verification_duration_seconds
             + self.transfer_duration_seconds
         )
+
+
+# Resolve forward references introduced by the M20 execution-control envelopes.
+ExecutionSubmitRequest.model_rebuild()
+ExecutionStatus.model_rebuild()

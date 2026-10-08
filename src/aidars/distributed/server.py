@@ -24,6 +24,7 @@ from aidars.distributed.models import (
     WorkloadSpec,
     WorkloadExecutionResult,
     WorkloadExecutionRequest,
+    ExecutionSubmitRequest, ExecutionStatus,
 )
 from aidars.distributed.transfer import (
     DEFAULT_CHUNK_SIZE,
@@ -237,6 +238,47 @@ class WorkerServer:
                 status="pong",
             )
             
+        # M20 asynchronous execution control plane. These requests are
+        # deliberately short-lived; workload duration is never represented
+        # by an HTTP request lifetime.
+        @router.post("/executions", response_model=ExecutionStatus, status_code=status.HTTP_202_ACCEPTED)
+        async def submit_execution(request: ExecutionSubmitRequest) -> ExecutionStatus:
+            if not self.distributed_worker:
+                raise HTTPException(status_code=500, detail="Worker instance not linked to server")
+            return await self.distributed_worker.submit_execution(
+                request.attempt_id, request.spec, request.execution_context,
+            )
+
+        @router.get("/executions/{attempt_id}", response_model=ExecutionStatus)
+        async def get_execution(attempt_id: str) -> ExecutionStatus:
+            if not self.distributed_worker:
+                raise HTTPException(status_code=500, detail="Worker instance not linked to server")
+            execution = await self.distributed_worker.get_execution(attempt_id)
+            if execution is None:
+                raise HTTPException(status_code=404, detail="Execution not found")
+            return execution
+
+        @router.post("/executions/{attempt_id}/cancel", response_model=ExecutionStatus)
+        async def cancel_execution(attempt_id: str) -> ExecutionStatus:
+            if not self.distributed_worker:
+                raise HTTPException(status_code=500, detail="Worker instance not linked to server")
+            execution = await self.distributed_worker.cancel_execution(attempt_id)
+            if execution is None:
+                raise HTTPException(status_code=404, detail="Execution not found")
+            return execution
+
+        @router.delete("/executions/{attempt_id}", status_code=status.HTTP_204_NO_CONTENT)
+        async def ack_execution(attempt_id: str) -> Response:
+            if not self.distributed_worker:
+                raise HTTPException(status_code=500, detail="Worker instance not linked to server")
+            try:
+                acknowledged = await self.distributed_worker.ack_execution(attempt_id)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=409, detail=str(exc))
+            if not acknowledged:
+                raise HTTPException(status_code=404, detail="Execution not found")
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
+
         @router.post("/workloads/execute", response_model=WorkloadExecutionResult, summary="Execute a workload")
         async def execute_workload_endpoint(spec: WorkloadSpec) -> WorkloadExecutionResult:
             if not self.distributed_worker:
@@ -257,7 +299,7 @@ class WorkerServer:
                 request.spec, execution_context=request.execution_context,
             )
 
-        @router.post("/api/v1/workloads/{workload_id}/checkpoint")
+        @router.post("/workloads/{workload_id}/checkpoint")
         async def checkpoint_workload_endpoint(workload_id: str) -> Dict[str, Any]:
             if not self.distributed_worker:
                 raise HTTPException(status_code=500, detail="Worker instance not linked to server")
@@ -266,7 +308,7 @@ class WorkerServer:
                 raise HTTPException(status_code=404, detail="Workload not found or could not be checkpointed")
             return {"status": "checkpointing"}
 
-        @router.post("/api/v1/workloads/{workload_id}/cancel")
+        @router.post("/workloads/{workload_id}/cancel")
         async def cancel_workload_endpoint(workload_id: str) -> Dict[str, Any]:
             if not self.distributed_worker:
                 raise HTTPException(status_code=500, detail="Worker instance not linked to server")

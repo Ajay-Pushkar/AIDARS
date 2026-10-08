@@ -11,6 +11,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Union
 
 import httpx
@@ -35,6 +36,7 @@ from aidars.distributed.models import (
     RuntimeExecutionContext,
     WorkloadSpec,
     WorkloadExecutionResult,
+    ExecutionState, ExecutionStatus,
     validate_sha256_hex,
 )
 from aidars.distributed.server import WorkerServer
@@ -44,6 +46,20 @@ from aidars.distributed.execution import ExecutionManager
 from aidars.distributed.runtime import GenericSubprocessRuntime
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _ExecutionRecord:
+    """Worker-local execution ledger keyed by coordinator attempt_id."""
+
+    attempt_id: str
+    workload_id: str
+    state: ExecutionState = ExecutionState.ACCEPTED
+    result: Optional[WorkloadExecutionResult] = None
+    task: Optional[asyncio.Task] = None
+    cancel_requested: bool = False
+    accepted_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
 
 
 class DistributedWorker:
@@ -130,6 +146,9 @@ class DistributedWorker:
         self._running = False
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._last_heartbeat_ack_utc: float = 0.0
+        # M20: execution control-plane state is keyed by attempt_id so a
+        # submit can be safely retried without starting a second process.
+        self._executions: Dict[str, _ExecutionRecord] = {}
 
     @property
     def inventory_hashes(self) -> Set[str]:
@@ -416,6 +435,97 @@ class DistributedWorker:
                 self.metrics_tracker.record_transfer_failure(unres_h)
         
         return results
+
+    def _execution_status(self, record: _ExecutionRecord) -> ExecutionStatus:
+        return ExecutionStatus(
+            attempt_id=record.attempt_id,
+            workload_id=record.workload_id,
+            state=record.state,
+            result=record.result,
+        )
+
+    async def submit_execution(
+        self, attempt_id: str, spec: WorkloadSpec,
+        execution_context: Optional[RuntimeExecutionContext] = None,
+    ) -> ExecutionStatus:
+        """Idempotently accept an execution and run it in the background."""
+        existing = self._executions.get(attempt_id)
+        if existing is not None:
+            return self._execution_status(existing)
+
+        record = _ExecutionRecord(attempt_id=attempt_id, workload_id=spec.workload_id)
+        self._executions[attempt_id] = record
+        record.task = asyncio.create_task(
+            self._run_execution_record(record, spec, execution_context),
+            name=f"aidar-execution-{attempt_id}",
+        )
+        return self._execution_status(record)
+
+    async def _run_execution_record(
+        self, record: _ExecutionRecord, spec: WorkloadSpec,
+        execution_context: Optional[RuntimeExecutionContext],
+    ) -> None:
+        record.state = ExecutionState.RUNNING
+        record.updated_at = time.time()
+        try:
+            if record.cancel_requested:
+                record.state = ExecutionState.CANCELLED
+                record.updated_at = time.time()
+                return
+
+            result = await self.execute_workload(spec, execution_context=execution_context)
+            record.result = result
+            record.state = ExecutionState.CANCELLED if record.cancel_requested else (
+                ExecutionState.SUCCEEDED if result.success else ExecutionState.FAILED
+            )
+        except asyncio.CancelledError:
+            record.state = ExecutionState.CANCELLED
+            record.result = WorkloadExecutionResult(
+                workload_id=spec.workload_id, worker_id=self.worker_id, success=False,
+                output_asset_hashes=set(), execution_duration_seconds=0.0,
+                error_message="Execution cancelled by request",
+                failure_category=FailureCategory.EXECUTION_FAILURE,
+            )
+        except Exception as exc:
+            logger.exception("Execution %s failed outside ExecutionManager", record.attempt_id)
+            record.state = ExecutionState.FAILED
+            record.result = WorkloadExecutionResult(
+                workload_id=spec.workload_id, worker_id=self.worker_id, success=False,
+                output_asset_hashes=set(), execution_duration_seconds=0.0,
+                error_message=str(exc), failure_category=FailureCategory.EXECUTION_FAILURE,
+            )
+        finally:
+            record.updated_at = time.time()
+
+    async def get_execution(self, attempt_id: str) -> Optional[ExecutionStatus]:
+        record = self._executions.get(attempt_id)
+        return self._execution_status(record) if record is not None else None
+
+    async def cancel_execution(self, attempt_id: str) -> Optional[ExecutionStatus]:
+        record = self._executions.get(attempt_id)
+        if record is None:
+            return None
+        if record.state in (ExecutionState.SUCCEEDED, ExecutionState.FAILED, ExecutionState.CANCELLED):
+            return self._execution_status(record)
+
+        record.cancel_requested = True
+        record.updated_at = time.time()
+        cancelled_runtime = await self.execution_manager.cancel_workload(record.workload_id)
+        if not cancelled_runtime and record.task is not None and not record.task.done():
+            # The task may still be in asset synchronization, before a
+            # RuntimeAdapter exists. Cancelling the task is then safe and the
+            # wrapper records the terminal cancelled state.
+            record.task.cancel()
+        return self._execution_status(record)
+
+    async def ack_execution(self, attempt_id: str) -> bool:
+        record = self._executions.get(attempt_id)
+        if record is None:
+            return False
+        if record.state not in (ExecutionState.SUCCEEDED, ExecutionState.FAILED, ExecutionState.CANCELLED):
+            raise RuntimeError("execution is not terminal")
+        self._executions.pop(attempt_id, None)
+        return True
 
     async def checkpoint_workload(self, workload_id: str) -> bool:
         """Request the ExecutionManager to gracefully checkpoint an active workload."""

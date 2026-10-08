@@ -163,9 +163,38 @@ class GenericSubprocessRuntime(RuntimeAdapter):
         self._terminate_process_tree()
 
     async def cancel(self) -> None:
-        """Cancel the subprocess gracefully then forcefully if needed."""
+        """Terminate the subprocess tree and wait for it to exit.
+
+        This is intentionally bounded control cleanup, not a workload
+        execution timeout. It exists so ExecutionManager can guarantee that
+        an explicit execution timeout or cancellation does not leave an
+        orphan process behind while the workspace is being removed.
+        """
         self._cancel_requested = True
         self._terminate_process_tree()
+        process = self._process
+        if process is None or process.returncode is not None:
+            return
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            try:
+                proc = psutil.Process(process.pid)
+                for child in proc.children(recursive=True):
+                    try:
+                        child.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+                try:
+                    proc.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            except psutil.NoSuchProcess:
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), timeout=1.0)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                pass
 
     def _terminate_process_tree(self):
         if self._process and self._process.returncode is None:

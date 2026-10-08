@@ -7,6 +7,7 @@ still exposes timing -- not just a successful one.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ import pytest
 from aidars.distributed.attempt import AttemptRegistry
 from aidars.distributed.cas_adapter import LocalCASAdapter
 from aidars.distributed.execution import ExecutionManager
-from aidars.distributed.models import FailureCategory, WorkloadExecutionResult, WorkloadSpec
+from aidars.distributed.models import FailureCategory, WorkloadExecutionResult, WorkloadSpec, ExecutionSpec
 from aidars.distributed.runtime import GenericSubprocessRuntime
 
 
@@ -65,8 +66,12 @@ async def test_timeout_failure_still_reports_execution_duration(tmp_path: Path):
     manager = ExecutionManager(cas_adapter=cas, workloads_dir=str(tmp_path / "workloads"))
     spec = WorkloadSpec(
         workload_id="task-timeout", task_type="test",
-        estimated_duration_seconds=0.01,  # timeout = 0.03s
-        parameters={"command": "sleep 5"},
+        estimated_duration_seconds=0.01,
+        execution_spec=ExecutionSpec(
+            executable=sys.executable,
+            args=["-c", "import time; time.sleep(0.1)"],
+            timeout_seconds=0.03,
+        ),
     )
     result = await manager.execute_workload(spec, "w-1", GenericSubprocessRuntime())
 
