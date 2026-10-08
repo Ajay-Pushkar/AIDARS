@@ -8,7 +8,7 @@ import logging
 import time
 import uuid
 import httpx
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit, quote
 from typing import List, Optional, Set
 
 from aidars.distributed.artifact import ArtifactRegistry
@@ -17,6 +17,7 @@ from aidars.distributed.job_registry import CompletionPolicy, JobRegistry
 from aidars.distributed.models import (
     ExecutionDescription, ExecutionGroup, ExecutionShape, FailureCategory,
     RuntimeExecutionContext, WorkerStatus, WorkloadExecutionRequest,
+    ExecutionSubmitRequest, ExecutionStatus, ExecutionState,
     WorkloadSpec, WorkloadExecutionResult,
 )
 from aidars.distributed.placement import PlacementEngine
@@ -25,6 +26,18 @@ from aidars.distributed.retry import DEFAULT_MAX_ATTEMPTS, should_retry
 from aidars.distributed.workload_registry import WorkloadRegistry, WorkloadState, TERMINAL_WORKLOAD_STATES
 
 logger = logging.getLogger(__name__)
+
+
+class WorkerExecutionUnavailable(RuntimeError):
+    """The worker cannot authoritatively report the requested execution."""
+
+
+class WorkerExecutionSubmitUnavailable(WorkerExecutionUnavailable):
+    """Submit was not accepted; no worker execution was proven to exist."""
+
+
+class WorkerExecutionRecordLost(WorkerExecutionUnavailable):
+    """A previously submitted execution record disappeared."""
 
 
 class WorkloadOrchestrator:
@@ -43,6 +56,7 @@ class WorkloadOrchestrator:
         attempt_registry: Optional[AttemptRegistry] = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         max_dispatch_tasks: int = 16,
+        execution_poll_interval_seconds: float = 1.0,
     ) -> None:
         self.registry = registry
         self.workload_registry = workload_registry
@@ -67,6 +81,7 @@ class WorkloadOrchestrator:
         self.attempt_registry = attempt_registry
         self.max_attempts = max_attempts
         self.max_dispatch_tasks = max(1, int(max_dispatch_tasks))
+        self.execution_poll_interval_seconds = max(0.05, float(execution_poll_interval_seconds))
         self._queue_event = asyncio.Event()
         self._queue_task: Optional[asyncio.Task] = None
         self._dispatch_tasks: Set[asyncio.Task] = set()
@@ -401,6 +416,142 @@ class WorkloadOrchestrator:
             }))
         return profiles
 
+    async def _submit_and_await(
+        self, client: httpx.AsyncClient, worker, attempt_id: str, spec: WorkloadSpec,
+        execution_context: Optional[RuntimeExecutionContext] = None,
+    ) -> WorkloadExecutionResult:
+        """Submit an execution and poll it to terminal state.
+
+        HTTP calls are bounded control requests only. No request lifetime is
+        allowed to become a workload execution deadline.
+        """
+        request = ExecutionSubmitRequest(
+            attempt_id=attempt_id, spec=spec, execution_context=execution_context,
+        )
+        base = worker.endpoint_url.rstrip("/")
+        encoded_attempt_id = quote(attempt_id, safe="")
+        submit_url = f"{base}/api/v1/executions"
+        status_url = f"{base}/api/v1/executions/{encoded_attempt_id}"
+        cancel_url = f"{status_url}/cancel"
+        control_timeout = 10.0
+
+        async def cancel_remote() -> None:
+            try:
+                await client.post(cancel_url, timeout=control_timeout)
+            except Exception as exc:
+                logger.warning("Best-effort cancel of %s on %s failed: %s", attempt_id, worker.worker_id, exc)
+
+        async def cancellation_result(message: str) -> WorkloadExecutionResult:
+            return WorkloadExecutionResult(
+                workload_id=spec.workload_id, worker_id=worker.worker_id, success=False,
+                output_asset_hashes=set(), execution_duration_seconds=0.0,
+                error_message=message, failure_category=FailureCategory.EXECUTION_FAILURE,
+            )
+
+        # Submit. If the transport response is ambiguous, resolve it by
+        # querying the same attempt_id rather than submitting a second time.
+        try:
+            response = await client.post(
+                submit_url, json=request.model_dump(mode="json"), timeout=control_timeout,
+            )
+            if response.status_code == 404:
+                raise WorkerExecutionSubmitUnavailable("worker does not expose the M20 execution endpoint")
+            response.raise_for_status()
+            payload = response.json()
+            try:
+                status = ExecutionStatus(**payload)
+            except Exception:
+                # Compatibility with existing MockTransport callers and the
+                # legacy execute endpoint: a terminal WorkloadExecutionResult
+                # is already a complete result, so do not require the new
+                # envelope merely to preserve established tests/callers.
+                return WorkloadExecutionResult(**payload)
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            try:
+                resolution = await client.get(status_url, timeout=control_timeout)
+            except httpx.RequestError as resolution_exc:
+                raise WorkerExecutionSubmitUnavailable(
+                    f"worker execution submit could not be resolved: {resolution_exc}"
+                ) from resolution_exc
+            if resolution.status_code == 404:
+                raise WorkerExecutionSubmitUnavailable("worker has no record of the submitted attempt")
+            resolution.raise_for_status()
+            status = ExecutionStatus(**resolution.json())
+
+        # A fast or idempotent resubmission may already be terminal.
+        if status.state in (ExecutionState.SUCCEEDED, ExecutionState.FAILED, ExecutionState.CANCELLED):
+            if status.result is not None:
+                await self._ack_execution(client, status_url, control_timeout)
+                return status.result
+            result = await cancellation_result("Execution cancelled by request")
+            await self._ack_execution(client, status_url, control_timeout)
+            return result
+
+        while True:
+            # Coordinator-owned cancellation/loss is authoritative and does
+            # not depend on the worker finishing another poll.
+            record = self.workload_registry.get_workload(spec.workload_id)
+            if record is not None and record.state in (WorkloadState.CANCELLATION_REQUESTED, WorkloadState.CANCELLED):
+                await cancel_remote()
+                return await cancellation_result("Execution cancelled by request")
+
+            if self.attempt_registry is not None:
+                attempt = self.attempt_registry.get_attempt(attempt_id)
+                if attempt is not None and attempt.status == AttemptStatus.LOST:
+                    await cancel_remote()
+                    return WorkloadExecutionResult(
+                        workload_id=spec.workload_id, worker_id=worker.worker_id, success=False,
+                        output_asset_hashes=set(), execution_duration_seconds=0.0,
+                        error_message="Owning worker was lost before completion",
+                        failure_category=FailureCategory.WORKER_UNAVAILABLE,
+                    )
+
+            try:
+                response = await client.get(status_url, timeout=control_timeout)
+                if response.status_code == 404:
+                    raise WorkerExecutionRecordLost("worker execution record disappeared")
+                response.raise_for_status()
+                payload = response.json()
+                try:
+                    status = ExecutionStatus(**payload)
+                except Exception:
+                    return WorkloadExecutionResult(**payload)
+            except httpx.HTTPStatusError as exc:
+                # A missing worker-side record is authoritative for this
+                # in-memory execution ledger. A transport status failure is
+                # handled as worker loss; ordinary transport errors below are
+                # deliberately retried.
+                if exc.response is not None and exc.response.status_code == 404:
+                    raise
+                logger.warning("Execution status request failed for %s: %s", attempt_id, exc)
+                await asyncio.sleep(self.execution_poll_interval_seconds)
+                continue
+            except httpx.RequestError as exc:
+                logger.warning("Transient execution poll failure for %s: %s", attempt_id, exc)
+                await asyncio.sleep(self.execution_poll_interval_seconds)
+                continue
+
+            if status.state in (ExecutionState.SUCCEEDED, ExecutionState.FAILED, ExecutionState.CANCELLED):
+                if status.result is not None:
+                    result = status.result
+                else:
+                    result = await cancellation_result("Execution cancelled by request")
+                await self._ack_execution(client, status_url, control_timeout)
+                return result
+
+            await asyncio.sleep(self.execution_poll_interval_seconds)
+
+    async def _ack_execution(self, client, status_url: str, timeout: float) -> None:
+        try:
+            response = await client.delete(status_url, timeout=timeout)
+            if response.status_code not in (200, 204, 404):
+                response.raise_for_status()
+        except Exception as exc:
+            # Ack is cleanup. Losing the ack must not turn a successful
+            # execution into a workload failure. The worker record remains
+            # available for a subsequent idempotent read/ack.
+            logger.warning("Execution ack failed for %s: %s", status_url, exc)
+
     async def _process_workload(self, workload_id: str) -> None:
         """Drive the workload through its lifecycle phases.
 
@@ -415,6 +566,9 @@ class WorkloadOrchestrator:
         """
         record = self.workload_registry.get_workload(workload_id)
         if not record:
+            return
+
+        if record.state in (WorkloadState.CANCELLATION_REQUESTED, WorkloadState.CANCELLED):
             return
 
         if self._dependency_state(record) != "ready":
@@ -616,6 +770,7 @@ class WorkloadOrchestrator:
             try:
                 if attempt_id:
                     self.attempt_registry.mark_running(attempt_id)
+                self.workload_registry.update_state(workload_id, WorkloadState.EXECUTING)
 
                 # Use http client (which defaults to httpx.AsyncClient or mock)
                 client = getattr(self, "http_client", None) or httpx.AsyncClient()
@@ -630,16 +785,38 @@ class WorkloadOrchestrator:
                     )
                     url = "distributed execution group"
                 else:
-                    resp = await client.post(url, json=spec.model_dump(mode='json'), timeout=60.0)
-                    resp.raise_for_status()
-                    result_data = resp.json()
-                    result = WorkloadExecutionResult(**result_data)
+                    if attempt_id is None:
+                        # Legacy callers without AttemptRegistry retain the
+                        # old synchronous endpoint for compatibility. M20's
+                        # normal coordinator path always has attempt_id.
+                        resp = await client.post(url, json=spec.model_dump(mode='json'), timeout=10.0)
+                        resp.raise_for_status()
+                        result = WorkloadExecutionResult(**resp.json())
+                    else:
+                        result = await self._submit_and_await(
+                            client, worker_info, attempt_id, spec, execution_context=None,
+                        )
 
                 if result.was_checkpointed and execution_group is not None:
                     result.success = False
                     result.was_checkpointed = False
                     result.failure_category = FailureCategory.APPLICATION_ERROR
                     result.error_message = "Distributed execution groups require a coordinated checkpoint, which this runtime did not provide"
+
+                current_record = self.workload_registry.get_workload(workload_id)
+                if current_record is not None and current_record.state in (
+                    WorkloadState.CANCELLATION_REQUESTED, WorkloadState.CANCELLED
+                ):
+                    if attempt_id and self.attempt_registry is not None:
+                        self.attempt_registry.mark_failed(
+                            attempt_id, FailureCategory.EXECUTION_FAILURE,
+                            "Execution cancelled by request", result,
+                        )
+                    self.workload_registry.update_state(
+                        workload_id, WorkloadState.CANCELLED,
+                        error_message="Execution cancelled by user request",
+                    )
+                    return
 
                 group_attempt_was_lost = False
                 if execution_group is not None and attempt_id and self.attempt_registry is not None:
@@ -702,9 +879,13 @@ class WorkloadOrchestrator:
 
                 # Failed result with an explicit, worker-reported outcome.
                 if attempt_id:
-                    if unavailable_group_workers or group_attempt_was_lost:
+                    latest_attempt = self.attempt_registry.get_attempt(attempt_id) if self.attempt_registry else None
+                    if (unavailable_group_workers or group_attempt_was_lost
+                            or (latest_attempt is not None and latest_attempt.status == AttemptStatus.LOST)):
                         self.attempt_registry.mark_lost(
-                            attempt_id, "distributed execution group lost a worker before completion",
+                            attempt_id,
+                            latest_attempt.failure_reason if (latest_attempt is not None and latest_attempt.failure_reason)
+                            else "worker lost before completion",
                             unavailable_worker_ids=sorted(unavailable_group_workers),
                         )
                     else:
@@ -732,6 +913,46 @@ class WorkloadOrchestrator:
                 self.workload_registry.set_result(workload_id, result)
                 self.workload_registry.update_state(
                     workload_id, WorkloadState.FAILED, error_message=result.error_message
+                )
+                return
+
+            except WorkerExecutionRecordLost as e:
+                logger.error(
+                    "Worker %s lost execution record %s: %s",
+                    decision.selected_worker_id, attempt_id, e,
+                )
+                failed_ids = execution_group.worker_ids if execution_group is not None else [decision.selected_worker_id]
+                for failed_id in failed_ids:
+                    self.registry.record_failure(failed_id, reason=f"execution record lost: {e}")
+                exhausted_worker_ids.update(failed_ids)
+                if attempt_id:
+                    self.attempt_registry.mark_lost(
+                        attempt_id, str(e), unavailable_worker_ids=failed_ids,
+                    )
+                if should_retry(FailureCategory.WORKER_UNAVAILABLE, attempts_used, self.max_attempts):
+                    continue
+                self.workload_registry.update_state(
+                    workload_id, WorkloadState.FAILED, error_message=str(e),
+                )
+                return
+
+            except WorkerExecutionSubmitUnavailable as e:
+                logger.error(
+                    "Worker %s rejected/lost submit for %s: %s",
+                    decision.selected_worker_id, attempt_id, e,
+                )
+                failed_ids = execution_group.worker_ids if execution_group is not None else [decision.selected_worker_id]
+                for failed_id in failed_ids:
+                    self.registry.record_failure(failed_id, reason=f"execution submit unavailable: {e}")
+                exhausted_worker_ids.update(failed_ids)
+                if attempt_id:
+                    self.attempt_registry.mark_failed(
+                        attempt_id, FailureCategory.WORKER_UNAVAILABLE, str(e),
+                    )
+                if should_retry(FailureCategory.WORKER_UNAVAILABLE, attempts_used, self.max_attempts):
+                    continue
+                self.workload_registry.update_state(
+                    workload_id, WorkloadState.FAILED, error_message=str(e),
                 )
                 return
 
@@ -793,13 +1014,13 @@ class WorkloadOrchestrator:
                 rank=rank, world_size=group.required_worker_count,
                 workers=worker_views,
             )
-            request = WorkloadExecutionRequest(spec=spec, execution_context=context)
-            response = await client.post(
-                f"{worker.endpoint_url}/api/v1/workloads/execute-group",
-                json=request.model_dump(mode="json"), timeout=60.0,
+            # Each group member uses the same coordinator attempt_id, scoped
+            # to its own worker, so submit is idempotent per worker while the
+            # durable AttemptRecord remains the single coordinator identity.
+            attempt_id = self.attempt_registry.get_latest_attempt(spec.workload_id).attempt_id if self.attempt_registry and self.attempt_registry.get_latest_attempt(spec.workload_id) else f"{spec.workload_id}#group-{rank}"
+            return worker_id, await self._submit_and_await(
+                client, worker, attempt_id, spec, execution_context=context,
             )
-            response.raise_for_status()
-            return worker_id, WorkloadExecutionResult(**response.json())
 
         outcomes = await asyncio.gather(
             *(dispatch(rank, worker_id) for rank, worker_id in enumerate(group.worker_ids)),
@@ -993,7 +1214,7 @@ class WorkloadOrchestrator:
             await checkpoint_member(worker_id, wid)
 
     async def cancel_workload(self, workload_id: str) -> bool:
-        """Cancel a workload and terminate its execution if running."""
+        """Cancel a workload and prevent any in-flight result from overwriting it."""
         record = self.workload_registry.get_workload(workload_id)
         if not record:
             return False
@@ -1001,24 +1222,30 @@ class WorkloadOrchestrator:
         if record.state in TERMINAL_WORKLOAD_STATES:
             return True
 
-        if record.state in (WorkloadState.EXECUTING, WorkloadState.SYNCING_ASSETS):
-            # Attempt to cancel on the worker
-            attempt = self.attempt_registry.get_active_attempt(workload_id)
-            if attempt and attempt.worker_id:
-                worker = self.registry.get_worker(attempt.worker_id)
-                if worker:
-                    client = getattr(self, "http_client", None) or httpx.AsyncClient()
-                    try:
-                        await client.post(
-                            f"{worker.endpoint_url}/api/v1/workloads/{workload_id}/cancel",
-                            timeout=5.0,
-                        )
-                    except Exception as exc:
-                        logger.warning("Failed to reach worker %s to cancel workload %s: %s", worker.worker_id, workload_id, exc)
+        self.workload_registry.update_state(
+            workload_id, WorkloadState.CANCELLATION_REQUESTED,
+            error_message="Cancellation requested by user",
+        )
+
+        attempt = self.attempt_registry.get_latest_attempt(workload_id) if self.attempt_registry else None
+        if attempt is not None and attempt.status in (AttemptStatus.ASSIGNED, AttemptStatus.RUNNING) and attempt.worker_id:
+            worker = self.registry.get_worker(attempt.worker_id)
+            if worker:
+                client = getattr(self, "http_client", None) or httpx.AsyncClient()
+                try:
+                    encoded_attempt_id = quote(attempt.attempt_id, safe="")
+                    await client.post(
+                        f"{worker.endpoint_url}/api/v1/executions/{encoded_attempt_id}/cancel",
+                        timeout=10.0,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to reach worker %s to cancel workload %s: %s",
+                        worker.worker_id, workload_id, exc,
+                    )
 
         self.workload_registry.update_state(
-            workload_id,
-            WorkloadState.CANCELLED,
+            workload_id, WorkloadState.CANCELLED,
             error_message="Execution cancelled by user request",
         )
         self._queued_ids.discard(workload_id)
