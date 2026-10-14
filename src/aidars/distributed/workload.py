@@ -16,6 +16,7 @@ from aidars.distributed.attempt import AttemptRegistry, AttemptStatus
 from aidars.distributed.job_registry import CompletionPolicy, JobRegistry
 from aidars.distributed.models import (
     ExecutionDescription, ExecutionGroup, ExecutionShape, FailureCategory,
+    JobSubmissionInfeasibleError,
     RuntimeExecutionContext, WorkerStatus, WorkloadExecutionRequest,
     ExecutionSubmitRequest, ExecutionStatus, ExecutionState,
     WorkloadSpec, WorkloadExecutionResult,
@@ -23,6 +24,7 @@ from aidars.distributed.models import (
 from aidars.distributed.placement import PlacementEngine
 from aidars.distributed.registry import WorkerRegistry
 from aidars.distributed.retry import DEFAULT_MAX_ATTEMPTS, should_retry
+from aidars.distributed.sizing import ClusterSizer, SizingRequest
 from aidars.distributed.workload_registry import WorkloadRegistry, WorkloadState, TERMINAL_WORKLOAD_STATES
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,7 @@ class WorkloadOrchestrator:
         self.workload_registry = workload_registry
         self.m7_ingestor = m7_ingestor
         self.placement_engine = PlacementEngine(m7_bridge=m7_bridge)
+        self.cluster_sizer = ClusterSizer(placement_engine=self.placement_engine)
         # Serializes placement through coordinator-side attempt assignment so
         # simultaneous submissions cannot all consume the same concurrency
         # slot based on an identical snapshot.
@@ -310,6 +313,9 @@ class WorkloadOrchestrator:
         threshold: Optional[int] = None,
         execution_shape: Optional[ExecutionShape] = None,
         required_worker_count: int = 1,
+        worker_count: Optional[Union[int, Literal["auto"]]] = None,
+        chunk_count: Optional[int] = None,
+        selected_worker_ids: Optional[List[str]] = None,
     ) -> str:
         """Submit a Job: a durable grouping of one or more WorkloadSpecs.
 
@@ -335,6 +341,20 @@ class WorkloadOrchestrator:
             )
         job_id = job_ids_present.pop() if job_ids_present else f"job-{uuid.uuid4().hex[:16]}"
 
+        stamped_specs = [
+            spec if spec.job_id == job_id else spec.model_copy(update={"job_id": job_id})
+            for spec in specs
+        ]
+        workload_ids = {s.workload_id for s in stamped_specs}
+
+        if self.job_registry is not None:
+            existing_job = self.job_registry.get_job(job_id)
+            if existing_job is not None:
+                # Submission idempotency: return existing job without re-sizing or replacing assignments
+                for spec in stamped_specs:
+                    await self.submit_workload(spec)
+                return job_id
+
         if execution_shape is None:
             execution_shape = (ExecutionShape.PIPELINE if any(s.depends_on for s in specs)
                                else ExecutionShape.TASK_SPLIT if len(specs) > 1
@@ -357,17 +377,78 @@ class WorkloadOrchestrator:
         elif required_worker_count != 1:
             raise ValueError("required_worker_count is only valid for DISTRIBUTED_NATIVE")
 
-        stamped_specs = [
-            spec if spec.job_id == job_id else spec.model_copy(update={"job_id": job_id})
-            for spec in specs
-        ]
-        workload_ids = {s.workload_id for s in stamped_specs}
+        assigned_workers: Optional[List[str]] = sorted(selected_worker_ids) if selected_worker_ids else None
+        spare_workers: Optional[List[str]] = None
+
+        if assigned_workers is None and execution_shape in (ExecutionShape.TASK_SPLIT, ExecutionShape.PIPELINE, ExecutionShape.SINGLE_MACHINE):
+            sample_spec = stamped_specs[0]
+            req_kwargs = {
+                "request_id": f"job-{job_id}",
+                "task_type": sample_spec.task_type,
+                "total_units": len(stamped_specs),
+                "unit_workload_seconds": sample_spec.estimated_duration_seconds,
+                "deadline_at_utc": sample_spec.deadline_at_utc,
+                "min_cpu_cores": max(s.min_cpu_cores for s in stamped_specs),
+                "min_ram_bytes": max((s.min_ram_bytes for s in stamped_specs), default=None),
+                "requires_gpu": any(s.requires_gpu for s in stamped_specs),
+                "min_vram_bytes": max(s.min_vram_bytes for s in stamped_specs),
+                "input_asset_hashes": set().union(*(s.input_asset_hashes for s in stamped_specs)),
+                "asset_sizes_bytes": self._trusted_asset_sizes(sample_spec),
+            }
+            if execution_shape == ExecutionShape.SINGLE_MACHINE:
+                req_kwargs["partitionable"] = False
+
+            if worker_count is not None and isinstance(worker_count, int):
+                # Explicit integer worker_count contract (worker_count=N)
+                async with self._placement_lock:
+                    all_workers = self.registry.list_workers(active_only=False)
+                    profiles = self._build_worker_profiles(all_workers)
+                    sizing_req = SizingRequest(max_workers_limit=worker_count, **req_kwargs)
+                    probe_spec = self.cluster_sizer.build_probe_spec(sizing_req, time.time())
+                    self.placement_engine.evaluate(probe_spec, profiles, asset_sizes_bytes=req_kwargs["asset_sizes_bytes"])
+                    last_eval = self.placement_engine.last_evaluation or {}
+                    eligible_ids = sorted(last_eval.get("eligible_worker_ids", []))
+
+                if len(eligible_ids) < worker_count:
+                    rejections = {
+                        cand["worker_id"]: cand.get("rejection_reasons", [])
+                        for cand in last_eval.get("candidates", [])
+                        if not cand.get("eligible", False)
+                    }
+                    raise JobSubmissionInfeasibleError(
+                        f"Explicit worker_count={worker_count} requested, but only {len(eligible_ids)} "
+                        f"eligible worker(s) available in cluster ({eligible_ids}). "
+                        f"Rejection diagnostics: {rejections}"
+                    )
+                assigned_workers = eligible_ids[:worker_count]
+                spare_workers = eligible_ids[worker_count:]
+            else:
+                # Adaptive sizing (worker_count="auto" or omitted)
+                sizing_req = SizingRequest(**req_kwargs)
+                async with self._placement_lock:
+                    all_workers = self.registry.list_workers(active_only=False)
+                    profiles = self._build_worker_profiles(all_workers)
+                    decision = self.cluster_sizer.size_cluster(sizing_req, profiles)
+
+                if decision.recommended_worker_count > 0:
+                    assigned_workers = decision.selected_worker_ids
+                    spare_workers = decision.spare_worker_ids
+                else:
+                    assigned_workers = []
+                    spare_workers = []
 
         if self.job_registry is None:
             self.job_registry = JobRegistry(self.workload_registry)
-        self.job_registry.create_job(job_id, workload_ids, completion_policy=completion_policy,
-                                     threshold=threshold, execution_shape=execution_shape,
-                                     required_worker_count=required_worker_count)
+        self.job_registry.create_job(
+            job_id,
+            workload_ids,
+            completion_policy=completion_policy,
+            threshold=threshold,
+            execution_shape=execution_shape,
+            required_worker_count=required_worker_count,
+            selected_worker_ids=assigned_workers,
+            spare_worker_ids=spare_workers,
+        )
 
         for spec in stamped_specs:
             await self.submit_workload(spec)
@@ -636,6 +717,15 @@ class WorkloadOrchestrator:
             )
             return
 
+        parent_job = self.job_registry.get_job(spec.job_id) if (spec.job_id and self.job_registry is not None) else None
+        job_selected_ids = set(parent_job.selected_worker_ids) if (parent_job and parent_job.selected_worker_ids is not None) else None
+        if job_selected_ids is not None and len(job_selected_ids) > 0 and all(wid in exhausted_worker_ids for wid in job_selected_ids):
+            self.workload_registry.update_state(
+                workload_id, WorkloadState.FAILED,
+                error_message="All assigned workers for this job have been exhausted by previous failed attempts",
+            )
+            return
+
         while True:
             attempts_used += 1
             attempt_id: Optional[str] = None
@@ -644,10 +734,17 @@ class WorkloadOrchestrator:
 
             async with self._placement_lock:
                 all_workers = self.registry.list_workers(active_only=False)
-                workers = [
-                    w for w in all_workers
-                    if w.worker_id not in exhausted_worker_ids
-                ]
+                if job_selected_ids is not None:
+                    workers = [
+                        w for w in all_workers
+                        if w.worker_id in job_selected_ids
+                        and w.worker_id not in exhausted_worker_ids
+                    ]
+                else:
+                    workers = [
+                        w for w in all_workers
+                        if w.worker_id not in exhausted_worker_ids
+                    ]
                 profiles = self._build_worker_profiles(workers)
 
                 group_workers: dict = {}
@@ -678,6 +775,22 @@ class WorkloadOrchestrator:
                 for worker in all_workers:
                     if worker.worker_id in evaluated_ids:
                         continue
+                    if job_selected_ids is not None and worker.worker_id not in job_selected_ids:
+                        evaluation.setdefault("candidates", []).append({
+                            "worker_id": worker.worker_id,
+                            "worker_status": worker.status.value,
+                            "health_eligible": worker.is_healthy,
+                            "can_execute_workloads": worker.can_execute_workloads,
+                            "eligible": False,
+                            "rejection_reasons": ["WORKER_NOT_IN_JOB_SELECTED_SET"],
+                            "checks": {
+                                "job_confinement": {
+                                    "result": False,
+                                    "reason": "Worker not in selected_worker_ids for this job",
+                                }
+                            },
+                        })
+                        continue
                     if worker.worker_id in exhausted_worker_ids:
                         evaluation.setdefault("candidates", []).append({
                             "worker_id": worker.worker_id, "worker_status": worker.status.value,
@@ -686,7 +799,7 @@ class WorkloadOrchestrator:
                             "eligible": False,
                             "rejection_reasons": ["WORKER_PREVIOUSLY_FAILED_THIS_WORKLOAD"],
                             "checks": {"retry_exclusion": {"result": False,
-                                "reason": "prior WORKER_UNAVAILABLE attempt"}},
+                                "reason": "prior failed attempt"}},
                         })
                         continue
                     if worker.resource_profile is None:
@@ -719,6 +832,18 @@ class WorkloadOrchestrator:
                         self.workload_registry.update_state(
                             workload_id, WorkloadState.UNSCHEDULABLE,
                             error_message="Required GPU runtime compatibility cannot be reported by the current worker telemetry",
+                        )
+                        return
+                    if job_selected_ids is not None and len(job_selected_ids) > 0 and all(wid in exhausted_worker_ids for wid in job_selected_ids):
+                        self.workload_registry.update_state(
+                            workload_id, WorkloadState.FAILED,
+                            error_message="All assigned workers for this job have been exhausted by previous failed attempts",
+                        )
+                        return
+                    if all_workers and all(w.worker_id in exhausted_worker_ids for w in all_workers):
+                        self.workload_registry.update_state(
+                            workload_id, WorkloadState.FAILED,
+                            error_message="All available workers have been exhausted by previous failed attempts",
                         )
                         return
                     self.workload_registry.update_state(

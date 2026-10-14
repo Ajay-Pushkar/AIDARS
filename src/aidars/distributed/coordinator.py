@@ -10,7 +10,7 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Union
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -44,6 +44,7 @@ from aidars.distributed.models import (
     WorkerRegistrationResponse,
     WorkerStatus,
     WorkloadSpec,
+    JobSubmissionInfeasibleError,
     validate_sha256_hex,
 )
 from aidars.m7.telemetry import TelemetryMemory, TelemetryIngestor
@@ -90,6 +91,9 @@ class JobSubmitRequest(BaseModel):
     threshold: Optional[int] = None
     execution_shape: Optional[ExecutionShape] = None
     required_worker_count: int = 1
+    worker_count: Optional[Union[int, Literal["auto"]]] = None
+    chunk_count: Optional[int] = None
+    selected_worker_ids: Optional[List[str]] = None
 
     @field_validator("specs")
     @classmethod
@@ -101,6 +105,9 @@ class JobSubmitRequest(BaseModel):
                 f"workload specs (got {len(v)})"
             )
         return v
+
+
+JobSubmitRequest.model_rebuild()
 
 
 class CoordinatorService:
@@ -1128,10 +1135,17 @@ class CoordinatorService:
         async def submit_job(req: JobSubmitRequest) -> Dict[str, str]:
             try:
                 job_id = await self.orchestrator.submit_job(
-                    req.specs, completion_policy=req.completion_policy, threshold=req.threshold,
+                    req.specs,
+                    completion_policy=req.completion_policy,
+                    threshold=req.threshold,
                     execution_shape=req.execution_shape,
                     required_worker_count=req.required_worker_count,
+                    worker_count=req.worker_count,
+                    chunk_count=req.chunk_count,
+                    selected_worker_ids=req.selected_worker_ids,
                 )
+            except JobSubmissionInfeasibleError as exc:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
             except WorkloadIdConflictError as exc:
                 # More specific than plain ValueError -- an existing
                 # workload_id under a different spec is a conflict with

@@ -302,10 +302,23 @@ class SceneEngine:
         frame_start: int,
         frame_end: int,
         worker_count: int,
+        chunk_count: Optional[int] = None,
+        adaptive: bool = False,
+        estimated_frame_duration_seconds: Optional[float] = None,
     ) -> SchedulingPlan:
         """Partition a frame range across workers with estimated asset-cost per chunk."""
         assets = self._extract_raw_assets(source)
-        return self.frame_scheduler.schedule(snapshot, graph, assets, frame_start, frame_end, worker_count)
+        return self.frame_scheduler.schedule(
+            snapshot,
+            graph,
+            assets,
+            frame_start,
+            frame_end,
+            worker_count,
+            chunk_count=chunk_count,
+            adaptive=adaptive,
+            estimated_frame_duration_seconds=estimated_frame_duration_seconds,
+        )
 
     def resolve_required_assets(
         self,

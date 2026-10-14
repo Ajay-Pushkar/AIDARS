@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Dict, Set
+from typing import TYPE_CHECKING, List, Dict, Set, Optional
 
 from aidars.adapters.blender.visibility.engine import VisibilityAnalyzer
 from aidars.adapters.blender.visibility.analyzer import RenderRequirementAnalyzer
@@ -38,6 +38,17 @@ from aidars.adapters.blender.packaging.resolver import RequirementResolver, Depe
 if TYPE_CHECKING:
     from aidars.adapters.blender.intelligence.dependency_graph import DependencyGraph
     from aidars.adapters.blender.intelligence.models import SceneSnapshot
+
+
+@dataclass(slots=True)
+class ChunkingConfig:
+    """Configurable baseline estimates for frame chunking decisions."""
+
+    default_overhead_seconds: float = 2.5       # Estimated subprocess launch + CAS ingest overhead
+    max_overhead_fraction: float = 0.10         # Target maximum allowable overhead ratio (<= 10%)
+    target_chunks_per_worker: int = 3           # Target multi-chunk pipelining multiplier
+    fallback_frame_duration_seconds: float = 5.0 # Conservative duration fallback when unmeasured
+    min_frames_per_chunk: int = 5               # Lower bound to prevent process startup thrashing
 
 
 @dataclass(slots=True)
@@ -79,9 +90,49 @@ class FrameScheduler:
         self,
         visibility_analyzer: "VisibilityAnalyzer | None" = None,
         requirement_analyzer: "RenderRequirementAnalyzer | None" = None,
+        config: "ChunkingConfig | None" = None,
     ) -> None:
         self.visibility_analyzer = visibility_analyzer or VisibilityAnalyzer()
         self.requirement_analyzer = requirement_analyzer or RenderRequirementAnalyzer()
+        self.config = config or ChunkingConfig()
+
+    def plan_adaptive_chunks(
+        self,
+        total_frames: int,
+        worker_count: int = 1,
+        estimated_frame_duration_seconds: Optional[float] = None,
+    ) -> int:
+        """Adaptive chunk planner balancing startup/ingest overhead against multi-chunk pipelining.
+
+        Preserves complete frame coverage while avoiding sub-threshold chunk fragmentation.
+        """
+        if total_frames <= self.config.min_frames_per_chunk:
+            return 1
+
+        t_frame = (
+            estimated_frame_duration_seconds
+            if estimated_frame_duration_seconds is not None and estimated_frame_duration_seconds > 0
+            else self.config.fallback_frame_duration_seconds
+        )
+        t_overhead = self.config.default_overhead_seconds
+        max_ratio = self.config.max_overhead_fraction
+
+        effective_workers = max(1, worker_count)
+        candidate_m = min(total_frames, effective_workers * self.config.target_chunks_per_worker)
+
+        while candidate_m > 1:
+            chunk_frames = total_frames // candidate_m
+            if chunk_frames < self.config.min_frames_per_chunk:
+                candidate_m -= 1
+                continue
+            t_work = chunk_frames * t_frame
+            ratio = t_overhead / (t_work + t_overhead)
+            if ratio > max_ratio:
+                candidate_m -= 1
+                continue
+            break
+
+        return max(1, candidate_m)
 
     def schedule(
         self,
@@ -90,10 +141,13 @@ class FrameScheduler:
         asset_sizes: Dict[str, int],
         frame_start: int,
         frame_end: int,
-        worker_count: int,
+        worker_count: int = 1,
         camera_id: str = "",
+        chunk_count: Optional[int] = None,
+        estimated_frame_duration_seconds: Optional[float] = None,
+        adaptive: bool = False,
     ) -> SchedulingPlan:
-        """Split [frame_start, frame_end] into worker_count contiguous chunks.
+        """Split [frame_start, frame_end] into contiguous chunks.
 
         Args:
             snapshot: An already-analyzed scene snapshot.
@@ -101,12 +155,14 @@ class FrameScheduler:
             asset_sizes: Mapping of physical file paths to size in bytes.
             frame_start: First frame of the job (inclusive).
             frame_end: Last frame of the job (inclusive).
-            worker_count: How many chunks to split the range into. Must be >= 1.
+            worker_count: How many workers to split across in legacy mode. Must be >= 1.
             camera_id: Optional camera name to restrict visibility.
+            chunk_count: Explicit chunk count. If set, overrides adaptive calculation.
+            estimated_frame_duration_seconds: Evidenced per-frame duration estimate.
+            adaptive: Whether to use adaptive chunk planning if chunk_count is omitted.
 
         Returns:
-            A SchedulingPlan with one ScheduledChunk per worker, each
-            carrying its real estimated asset cost.
+            A SchedulingPlan with ScheduledChunk objects, each carrying its real estimated asset cost.
         """
         if worker_count < 1:
             raise ValueError("worker_count must be at least 1")
@@ -114,16 +170,27 @@ class FrameScheduler:
             raise ValueError("frame_end must be >= frame_start")
 
         total_frames = frame_end - frame_start + 1
-        chunk_size = max(1, math.ceil(total_frames / worker_count))
+
+        if chunk_count is not None:
+            if chunk_count < 1:
+                raise ValueError("chunk_count must be at least 1")
+            num_chunks = min(chunk_count, total_frames)
+        elif adaptive:
+            num_chunks = self.plan_adaptive_chunks(
+                total_frames, worker_count, estimated_frame_duration_seconds
+            )
+        else:
+            num_chunks = min(worker_count, total_frames)
 
         chunks: List[ScheduledChunk] = []
-        frame = frame_start
-        worker_index = 0
-        while frame <= frame_end:
-            chunk_end = min(frame + chunk_size - 1, frame_end)
-            chunks.append(self._build_chunk(snapshot, graph, asset_sizes, frame, chunk_end, worker_index, camera_id))
-            frame = chunk_end + 1
-            worker_index += 1
+        for i in range(num_chunks):
+            chunk_start = frame_start + (i * total_frames) // num_chunks
+            chunk_end = frame_start + ((i + 1) * total_frames) // num_chunks - 1
+            chunks.append(
+                self._build_chunk(
+                    snapshot, graph, asset_sizes, chunk_start, chunk_end, i, camera_id
+                )
+            )
 
         return SchedulingPlan(chunks=chunks)
 

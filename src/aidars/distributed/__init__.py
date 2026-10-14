@@ -67,6 +67,15 @@ from aidars.distributed.transfer import (
     transfer_asset_from_candidate,
     transfer_asset_with_failover,
 )
+from aidars.distributed.sizing import (
+    ClusterSizer,
+    GroupSizingEvaluation,
+    SizingDecision,
+    SizingFeasibilityStatus,
+    SizingPolicy,
+    SizingRequest,
+    WorkerSizingDetail,
+)
 from aidars.distributed.worker import DistributedWorker
 
 
@@ -144,4 +153,12 @@ __all__ = [
     "WorkerHttpError",
     "CandidateExhaustedError",
     "CASCommitError",
+    # Sizing (M1)
+    "ClusterSizer",
+    "SizingRequest",
+    "SizingDecision",
+    "SizingPolicy",
+    "SizingFeasibilityStatus",
+    "WorkerSizingDetail",
+    "GroupSizingEvaluation",
 ]

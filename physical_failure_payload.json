@@ -1,0 +1,18 @@
+{
+  "workload_id": "worker-midflight-failure-02",
+  "task_type": "physical_failure_recovery",
+  "input_asset_hashes": ["feb3422f609741edfd42d724dc8dbbe864f98cf5f5d4bb5f6810a914734c7579"],
+  "min_cpu_cores": 1,
+  "min_ram_bytes": 1048576,
+  "affinity_group_id": "midflight-failure-test-02",
+  "affinity_mode": "same_worker",
+  "affinity_hard": true,
+  "execution_spec": {
+    "executable": "python",
+    "args": ["inputs/feb3422f609741edfd42d724dc8dbbe864f98cf5f5d4bb5f6810a914734c7579"],
+    "timeout_seconds": 90
+  },
+  "parameters": {
+    "expected_output_count": 1
+  }
+}

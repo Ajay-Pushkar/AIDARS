@@ -201,14 +201,16 @@ async def test_dispatch_exception_is_worker_unavailable_and_retryable():
 
     attempts = attempt_registry.list_attempts_for_workload("task-1")
     # Only one worker exists, and it's excluded from this workload's
-    # remaining attempts after failing once. With M11 admission semantics,
-    # temporary lack of an eligible worker leaves the original workload
-    # pending for reconsideration and does not manufacture another attempt.
+    # remaining attempts after failing once. Because it is the ONLY worker
+    # in the cluster, all permissible candidates are now exhausted.
+    # The workload correctly reaches a terminal FAILED state rather than
+    # zombieing indefinitely in SUBMITTED.
     assert attempts[0].failure_category == FailureCategory.WORKER_UNAVAILABLE
     assert attempts[0].status == AttemptStatus.FAILED
     assert len(attempts) == 1
     record = workload_registry.get_workload("task-1")
-    assert record.state == WorkloadState.SUBMITTED
+    assert record.state == WorkloadState.FAILED
+    assert record.error_message == "All available workers have been exhausted by previous failed attempts"
 
 
 # ============================================================================
@@ -441,3 +443,86 @@ async def test_placement_recovery_preserves_hard_affinity_after_failure():
     # Only 1 attempt actually got placed before the retry loop blocked the second attempt
     assert len(attempts) == 1
     assert attempts[0].worker_id == "worker-b"
+
+@pytest.mark.asyncio
+async def test_cluster_exhaustion_terminates_workload():
+    """Both workers fail with EXECUTION_TIMEOUT and the workload reaches FAILED when no permissible retry candidate remains."""
+    call_count = 0
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json=_failed_result("task-exhaust", FailureCategory.EXECUTION_TIMEOUT).model_dump(mode="json"))
+
+    orchestrator, workload_registry, attempt_registry = _make_orchestrator(handler, max_attempts=3)
+    registry = orchestrator.registry
+    registry.register_worker(WorkerInfo(
+        worker_id="w-2", endpoint_url="http://worker-2", ip_address="127.0.0.1", port=8002,
+        status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("w-2", "http://worker-2", "127.0.0.1"),
+    ))
+
+    workload_registry.add_workload(WorkloadSpec(workload_id="task-exhaust", task_type="test", min_ram_bytes=1024))
+    await orchestrator._process_workload("task-exhaust")
+
+    attempts = attempt_registry.list_attempts_for_workload("task-exhaust")
+    assert len(attempts) == 2
+    assert all(a.status == AttemptStatus.FAILED for a in attempts)
+    assert all(a.failure_category == FailureCategory.EXECUTION_TIMEOUT for a in attempts)
+
+    record = workload_registry.get_workload("task-exhaust")
+    assert record.state == WorkloadState.FAILED
+    assert record.error_message == "All available workers have been exhausted by previous failed attempts"
+
+@pytest.mark.asyncio
+async def test_temporarily_unavailable_workers_leaves_workload_submitted():
+    """A workload remains SUBMITTED when workers are only temporarily unavailable and future progress remains possible."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_success_result("task-temp").model_dump(mode="json"))
+
+    orchestrator, workload_registry, attempt_registry = _make_orchestrator(handler, max_attempts=3)
+    registry = orchestrator.registry
+    registry.register_worker(WorkerInfo(
+        worker_id="w-1", endpoint_url="http://worker-1", ip_address="127.0.0.1", port=8001,
+        status=WorkerStatus.OFFLINE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("w-1", "http://worker-1", "127.0.0.1"),
+    ))
+
+    workload_registry.add_workload(WorkloadSpec(workload_id="task-temp", task_type="test", min_ram_bytes=1024))
+    await orchestrator._process_workload("task-temp")
+
+    attempts = attempt_registry.list_attempts_for_workload("task-temp")
+    assert len(attempts) == 0  # No attempt ever created because no eligible worker was online
+
+    record = workload_registry.get_workload("task-temp")
+    assert record.state == WorkloadState.SUBMITTED
+    assert record.error_message == "Waiting for an eligible worker; placement will be reconsidered"
+
+@pytest.mark.asyncio
+async def test_genuinely_eligible_new_worker_can_still_be_scheduled():
+    """A workload with a genuinely eligible new worker can still be scheduled according to the existing retry policy."""
+    call_count = 0
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return httpx.Response(200, json=_failed_result("task-new", FailureCategory.EXECUTION_TIMEOUT).model_dump(mode="json"))
+        return httpx.Response(200, json=_success_result("task-new").model_dump(mode="json"))
+
+    orchestrator, workload_registry, attempt_registry = _make_orchestrator(handler, max_attempts=3)
+    registry = orchestrator.registry
+    registry.register_worker(WorkerInfo(
+        worker_id="w-2", endpoint_url="http://worker-2", ip_address="127.0.0.1", port=8002,
+        status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("w-2", "http://worker-2", "127.0.0.1"),
+    ))
+
+    workload_registry.add_workload(WorkloadSpec(workload_id="task-new", task_type="test", min_ram_bytes=1024))
+    await orchestrator._process_workload("task-new")
+
+    attempts = attempt_registry.list_attempts_for_workload("task-new")
+    assert len(attempts) == 2
+    assert attempts[0].status == AttemptStatus.FAILED
+    assert attempts[1].status == AttemptStatus.SUCCEEDED
+    
+    record = workload_registry.get_workload("task-new")
+    assert record.state == WorkloadState.COMPLETED

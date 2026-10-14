@@ -337,6 +337,7 @@ async def test_concurrent_dispatches_do_not_exceed_worker_workload_limit():
     class Response:
         def __init__(self, workload_id):
             self.workload_id = workload_id
+            self.status_code = 200
 
         def raise_for_status(self):
             pass
@@ -353,7 +354,7 @@ async def test_concurrent_dispatches_do_not_exceed_worker_workload_limit():
     class SlowClient:
         async def post(self, url, json, timeout):
             await asyncio.sleep(0.03)
-            return Response(json["workload_id"])
+            return Response(json.get("workload_id") or json["spec"]["workload_id"])
 
     service.orchestrator.http_client = SlowClient()
     for workload_id in ("first", "second"):

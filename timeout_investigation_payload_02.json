@@ -1,0 +1,19 @@
+{
+    "execution_spec":  {
+                           "args":  [
+                                        "inputs/61d174c89d692c7309e576372845a6e33d37fa5e221ada292f20d90d042fade2"
+                                    ],
+                           "timeout_seconds":  90,
+                           "executable":  "python"
+                       },
+    "task_type":  "physical_timeout_investigation",
+    "min_ram_bytes":  1048576,
+    "min_cpu_cores":  1,
+    "workload_id":  "timeout-investigation-02",
+    "parameters":  {
+                       "expected_output_count":  1
+                   },
+    "input_asset_hashes":  [
+                               "61d174c89d692c7309e576372845a6e33d37fa5e221ada292f20d90d042fade2"
+                           ]
+}

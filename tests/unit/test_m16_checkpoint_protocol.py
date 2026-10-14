@@ -91,8 +91,9 @@ def test_env(tmp_path):
 
 
 class MockResponse:
-    def __init__(self, json_data):
+    def __init__(self, json_data, status_code=200):
         self._json_data = json_data
+        self.status_code = status_code
     def raise_for_status(self): pass
     def json(self): return self._json_data
 
@@ -110,7 +111,9 @@ async def test_m16_2_end_to_end_checkpoint_and_resume(test_env, monkeypatch):
         if url.endswith("/checkpoint"):
             await worker.checkpoint_workload("w-1")
             return MockResponse({})
-        spec = WorkloadSpec(**kwargs["json"])
+        payload = kwargs["json"]
+        spec_payload = payload.get("spec", payload)
+        spec = WorkloadSpec(**spec_payload)
         result = await worker.execute_workload(spec)
         if not result.success:
             print(f"MOCK POST RESULT FAILED: {result.error_message}")

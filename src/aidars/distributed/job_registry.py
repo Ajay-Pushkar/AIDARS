@@ -110,6 +110,8 @@ class JobRecord:
         threshold: Optional[int] = None,
         execution_shape: ExecutionShape = ExecutionShape.TASK_SPLIT,
         required_worker_count: int = 1,
+        selected_worker_ids: Optional[List[str]] = None,
+        spare_worker_ids: Optional[List[str]] = None,
     ) -> None:
         if completion_policy == CompletionPolicy.THRESHOLD and not threshold:
             raise ValueError("THRESHOLD completion policy requires a positive threshold")
@@ -126,6 +128,8 @@ class JobRecord:
         self.threshold = threshold
         self.execution_shape = execution_shape
         self.required_worker_count = required_worker_count
+        self.selected_worker_ids: Optional[List[str]] = sorted(selected_worker_ids) if selected_worker_ids else None
+        self.spare_worker_ids: Optional[List[str]] = sorted(spare_worker_ids) if spare_worker_ids else None
         self.created_at = time.time()
 
 
@@ -160,6 +164,8 @@ class JobRegistry:
         threshold: Optional[int] = None,
         execution_shape: ExecutionShape = ExecutionShape.TASK_SPLIT,
         required_worker_count: int = 1,
+        selected_worker_ids: Optional[List[str]] = None,
+        spare_worker_ids: Optional[List[str]] = None,
     ) -> JobRecord:
         """Create (or, if job_id already exists, return the existing) Job record.
 
@@ -169,8 +175,16 @@ class JobRegistry:
         with self._lock:
             if job_id in self._jobs:
                 return self._jobs[job_id]
-            record = JobRecord(job_id, workload_ids, completion_policy, threshold,
-                               execution_shape, required_worker_count)
+            record = JobRecord(
+                job_id,
+                workload_ids,
+                completion_policy,
+                threshold,
+                execution_shape,
+                required_worker_count,
+                selected_worker_ids,
+                spare_worker_ids,
+            )
             self._jobs[job_id] = record
             snapshot = copy.deepcopy(record)
         self._persist_job(snapshot)

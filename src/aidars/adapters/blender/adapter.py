@@ -33,15 +33,38 @@ class BlenderAdapter(ApplicationAdapter):
         input_path = request.get("input_path")
         frame_start = request.get("frame_start", 1)
         frame_end = request.get("frame_end", 250)
-        worker_count = request.get("worker_count", 2)
-        requires_gpu = request.get("requires_gpu", True)
+        worker_count_param = request.get("worker_count", "auto")
+        chunk_count_param = request.get("chunk_count")
+        requires_gpu = request.get("requires_gpu", False)
+        min_cpu_cores = request.get("min_cpu_cores", 1)
+        estimated_frame_duration = float(request.get("estimated_frame_duration_seconds", 2.0))
+
+        if worker_count_param == "auto" or worker_count_param is None:
+            effective_workers = 1
+        else:
+            effective_workers = max(1, int(worker_count_param))
+
+        if chunk_count_param is not None:
+            chunk_count = int(chunk_count_param)
+            adaptive = False
+        else:
+            chunk_count = None
+            adaptive = True
 
         engine = SceneEngine()
         source = engine.load_source(input_path)
         snapshot = engine.analyze(source)
         graph = engine.build_dependency_graph(snapshot)
         plan = engine.build_scheduling_plan(
-            source, snapshot, graph, frame_start, frame_end, worker_count
+            source,
+            snapshot,
+            graph,
+            frame_start,
+            frame_end,
+            effective_workers,
+            chunk_count=chunk_count,
+            adaptive=adaptive,
+            estimated_frame_duration_seconds=estimated_frame_duration,
         )
 
         # M4: resolve real physical assets and their SHA-256 hashes. Only
@@ -81,18 +104,21 @@ class BlenderAdapter(ApplicationAdapter):
             for sha256, source_path in resolved_paths_by_hash.items():
                 self.asset_manager.upload_asset_file(source_path, sha256)
 
-        min_vram_bytes = 4 * 1024 * 1024 * 1024 if requires_gpu else 0
+        total_asset_bytes = sum(record.size_bytes or 0 for record in asset_records)
+        base_runtime_ram = 256 * 1024 * 1024
+        evidenced_ram = int(base_runtime_ram + total_asset_bytes * 1.5)
+        min_ram_bytes = request.get(
+            "min_ram_bytes",
+            evidenced_ram if total_asset_bytes > 0 else 256 * 1024 * 1024,
+        )
+        min_vram_bytes = request.get(
+            "min_vram_bytes",
+            2 * 1024 * 1024 * 1024 if requires_gpu else 0,
+        )
 
         # M8.1/workload-identity: one job_id per evaluate_request() call,
         # shared across every chunk it returns, and used as the workload_id
-        # prefix. Previously workload_id was
-        # md5(input_path + chunk.frame_start + chunk.frame_end), which
-        # collides on any second, independently-submitted request for the
-        # same file and frame range (e.g. resubmitting a render). A fresh
-        # UUID per call is collision-resistant and, as a bonus, gives
-        # evaluate_request()'s multi-chunk return value the first-class
-        # grouping identity it never had: submit_job() (WorkloadOrchestrator)
-        # reuses this job_id rather than minting a conflicting new one.
+        # prefix.
         job_id = f"job-{uuid.uuid4().hex[:16]}"
 
         specs = []
@@ -110,7 +136,10 @@ class BlenderAdapter(ApplicationAdapter):
                 "job_frame_start": frame_start,
                 "job_frame_end": frame_end,
             }
-            
+            if "min_ram_bytes" not in request and total_asset_bytes == 0:
+                params["resource_requirement_confidence"] = "unverified"
+                params["ram_requirement_state"] = "undeclared_unconstrained"
+
             # Store hash for execution spec builder
             if input_file_hash:
                 params["input_file_hash"] = input_file_hash
@@ -127,12 +156,12 @@ class BlenderAdapter(ApplicationAdapter):
                 job_id=job_id,
                 task_type="blender_render",
                 input_asset_hashes=input_asset_hashes,
-                min_cpu_cores=4,
-                min_ram_bytes=8 * 1024 * 1024 * 1024,
+                min_cpu_cores=min_cpu_cores,
+                min_ram_bytes=min_ram_bytes,
                 requires_gpu=requires_gpu,
                 min_vram_bytes=min_vram_bytes,
-                estimated_duration_seconds=float(chunk.frame_count) * 2.0, # 2 sec per frame (existing convention)
-                parameters=params
+                estimated_duration_seconds=float(chunk.frame_count) * estimated_frame_duration,
+                parameters=params,
             )
             specs.append(spec)
 

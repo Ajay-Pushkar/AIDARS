@@ -84,6 +84,12 @@ def validate_sha256_hex(val: str) -> str:
     return cleaned
 
 
+class JobSubmissionInfeasibleError(ValueError):
+    """Raised when explicit job constraints (such as an explicit worker_count)
+    cannot be satisfied by the available eligible cluster workers."""
+    pass
+
+
 def validate_ip_address(val: str) -> str:
     """Validate that a string is a valid IPv4 or IPv6 address."""
     if not isinstance(val, str):

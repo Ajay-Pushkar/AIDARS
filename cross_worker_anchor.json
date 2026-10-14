@@ -1,0 +1,21 @@
+﻿{
+  "workload_id": "cross-worker-test-anchor",
+  "task_type": "compute",
+  "input_asset_hashes": [
+    "9152b5811f0ba2fc807726164621ddaf8905c93efea74dedf22e92ea01a4fd9"
+  ],
+  "affinity_group_id": "cross-worker-test",
+  "affinity_mode": "different_worker",
+  "affinity_hard": true,
+  "execution_spec": {
+    "executable": "python",
+    "args": [
+      "-c",
+      "print('Anchor complete')"
+    ],
+    "env": {},
+    "cwd": null,
+    "timeout_seconds": 10
+  },
+  "parameters": {}
+}

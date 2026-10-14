@@ -9,6 +9,7 @@ from aidars.distributed.models import (
     WorkloadSpec,
     WorkerResourceProfile,
     PlacementDecision,
+    ExecutionSpec,
 )
 from aidars.distributed.singleflight import SingleFlight
 from aidars.distributed.placement import PlacementEngine
@@ -186,7 +187,10 @@ async def test_6_10_execution_timeout(tmp_path):
     spec = WorkloadSpec(
         workload_id="task-timeout",
         task_type="test",
-        estimated_duration_seconds=0.1, # Short timeout (0.3s hard timeout)
+        estimated_duration_seconds=0.1,
+        execution_spec=ExecutionSpec(
+            executable="python", args=["-c", "import time; time.sleep(1)"], timeout_seconds=0.3,
+        ),
         parameters={"command": "python -c \"import time; time.sleep(1)\""}
     )
     

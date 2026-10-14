@@ -134,8 +134,9 @@ def _sync_wrap(workers):
         from aidars.distributed.models import WorkloadExecutionResult
         import json as _json
         spec_data = _json.loads(request.content)
+        workload_id = spec_data.get("workload_id") or spec_data.get("spec", {}).get("workload_id")
         result = WorkloadExecutionResult(
-            workload_id=spec_data["workload_id"], worker_id=matched, success=True,
+            workload_id=workload_id, worker_id=matched, success=True,
             output_asset_hashes=set(), execution_duration_seconds=0.1,
         )
         return httpx.Response(200, json=result.model_dump(mode="json"))

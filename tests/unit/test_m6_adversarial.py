@@ -6,6 +6,7 @@ from typing import Set
 from aidars.distributed.models import (
     WorkloadSpec,
     WorkerResourceProfile,
+    ExecutionSpec,
 )
 from aidars.distributed.placement import PlacementEngine
 from aidars.distributed.execution import ExecutionManager
@@ -139,6 +140,9 @@ async def test_c2_runtime_timeout(tmp_path):
         workload_id="task-timeout",
         task_type="test",
         estimated_duration_seconds=0.1,
+        execution_spec=ExecutionSpec(
+            executable="python", args=["-c", "import time; time.sleep(10)"], timeout_seconds=0.2,
+        ),
         parameters={"command": "python -c \"import time; time.sleep(10)\""}
     )
     

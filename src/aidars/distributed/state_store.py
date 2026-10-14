@@ -288,6 +288,8 @@ class CoordinatorStateStore:
                     threshold INTEGER,
                     execution_shape TEXT NOT NULL DEFAULT 'task_split',
                     required_worker_count INTEGER NOT NULL DEFAULT 1,
+                    selected_worker_ids_json TEXT,
+                    spare_worker_ids_json TEXT,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
@@ -297,6 +299,10 @@ class CoordinatorStateStore:
                 cursor.execute("ALTER TABLE jobs ADD COLUMN execution_shape TEXT NOT NULL DEFAULT 'task_split'")
             if "required_worker_count" not in job_columns:
                 cursor.execute("ALTER TABLE jobs ADD COLUMN required_worker_count INTEGER NOT NULL DEFAULT 1")
+            if "selected_worker_ids_json" not in job_columns:
+                cursor.execute("ALTER TABLE jobs ADD COLUMN selected_worker_ids_json TEXT")
+            if "spare_worker_ids_json" not in job_columns:
+                cursor.execute("ALTER TABLE jobs ADD COLUMN spare_worker_ids_json TEXT")
 
             # M8.8/M8.9: Artifact provenance + lifecycle metadata only --
             # never a second copy of the CAS bytes or a second hash scheme.
@@ -510,14 +516,17 @@ class CoordinatorStateStore:
             self._conn.execute("""
                 INSERT INTO jobs (
                     job_id, workload_ids_json, completion_policy, threshold,
-                    execution_shape, required_worker_count, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    execution_shape, required_worker_count, selected_worker_ids_json,
+                    spare_worker_ids_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO UPDATE SET
                     workload_ids_json = excluded.workload_ids_json,
                     completion_policy = excluded.completion_policy,
                     threshold = excluded.threshold,
                     execution_shape = excluded.execution_shape,
                     required_worker_count = excluded.required_worker_count,
+                    selected_worker_ids_json = excluded.selected_worker_ids_json,
+                    spare_worker_ids_json = excluded.spare_worker_ids_json,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at;
             """, (
@@ -527,6 +536,8 @@ class CoordinatorStateStore:
                 record.threshold,
                 record.execution_shape.value,
                 record.required_worker_count,
+                json.dumps(record.selected_worker_ids) if record.selected_worker_ids else None,
+                json.dumps(record.spare_worker_ids) if record.spare_worker_ids else None,
                 record.created_at,
                 now,
             ))
@@ -555,16 +566,25 @@ class CoordinatorStateStore:
     @staticmethod
     def _row_to_job_record(row: sqlite3.Row) -> JobRecord:
         workload_ids = set(json.loads(row["workload_ids_json"]))
+        row_keys = row.keys()
+        selected_workers = None
+        if "selected_worker_ids_json" in row_keys and row["selected_worker_ids_json"]:
+            selected_workers = json.loads(row["selected_worker_ids_json"])
+        spare_workers = None
+        if "spare_worker_ids_json" in row_keys and row["spare_worker_ids_json"]:
+            spare_workers = json.loads(row["spare_worker_ids_json"])
         record = JobRecord(
             job_id=row["job_id"],
             workload_ids=workload_ids,
             completion_policy=CompletionPolicy(row["completion_policy"]),
             threshold=row["threshold"],
             execution_shape=(ExecutionShape(row["execution_shape"])
-                             if "execution_shape" in row.keys() and row["execution_shape"]
+                             if "execution_shape" in row_keys and row["execution_shape"]
                              else ExecutionShape.TASK_SPLIT),
             required_worker_count=(row["required_worker_count"]
-                                   if "required_worker_count" in row.keys() else 1),
+                                   if "required_worker_count" in row_keys else 1),
+            selected_worker_ids=selected_workers,
+            spare_worker_ids=spare_workers,
         )
         record.created_at = row["created_at"]
         return record

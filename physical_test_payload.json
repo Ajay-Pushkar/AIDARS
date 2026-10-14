@@ -1,0 +1,12 @@
+{
+  "workload_id": "physical-cpu-test-01",
+  "task_type": "compute",
+  "min_cpu_cores": 1,
+  "min_ram_bytes": 268435456,
+  "requires_gpu": false,
+  "estimated_duration_seconds": 10,
+  "priority": 100,
+  "parameters": {
+    "expected_output_count": 1
+  }
+}

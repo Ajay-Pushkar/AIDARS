@@ -1,0 +1,24 @@
+{
+  "workload_id": "physical-cpu-test-02",
+  "task_type": "compute",
+  "input_asset_hashes": [
+    "9152b5811f0ba2fc807726164621ddaf8905c93efea74dedf22e92ea01a4fd9a"
+  ],
+  "min_cpu_cores": 1,
+  "min_ram_bytes": 268435456,
+  "requires_gpu": false,
+  "estimated_duration_seconds": 10,
+  "priority": 100,
+  "parameters": {
+    "execution_spec": {
+      "executable": "python",
+      "args": [
+        "physical_cpu_test.py"
+      ],
+      "env": {},
+      "cwd": null,
+      "timeout_seconds": 10
+    },
+    "expected_output_count": 1
+  }
+}

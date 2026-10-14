@@ -1,0 +1,13 @@
+{
+  "workload_id": "midflight-anchor-01",
+  "task_type": "physical_anchor",
+  "input_asset_hashes": ["feb3422f609741edfd42d724dc8dbbe864f98cf5f5d4bb5f6810a914734c7579"],
+  "min_cpu_cores": 1,
+  "min_ram_bytes": 1048576,
+  "affinity_group_id": "midflight-anchor-group",
+  "execution_spec": {
+    "executable": "python",
+    "args": ["-c", "print('ANCHOR_OK')"],
+    "timeout_seconds": 30
+  }
+}
