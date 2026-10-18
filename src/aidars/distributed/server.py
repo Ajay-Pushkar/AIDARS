@@ -6,11 +6,14 @@ and leak-free resource cleanup on client aborts.
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import io
 import logging
 import os
+import tempfile
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import (
@@ -61,6 +64,7 @@ class WorkerServer:
         distributed_worker: Optional[Any] = None,
     ) -> None:
         self.cas = cas_adapter
+        self.cas_adapter = cas_adapter
         self.distributed_worker = distributed_worker
         self.worker_id = worker_id or f"worker-{int(time.time())}"
         self.host = host
@@ -211,6 +215,67 @@ class WorkerServer:
                 headers=resp_headers,
                 media_type="application/octet-stream",
             )
+
+        @router.put(
+            "/assets/{sha256}",
+            status_code=status.HTTP_200_OK,
+            summary="Upload a binary asset into the worker's local CAS with SHA-256 verification",
+            dependencies=[Depends(verify_control_plane_auth)],
+        )
+        async def upload_asset(sha256: str, request: Request) -> Dict[str, Any]:
+            try:
+                norm_sha256 = validate_sha256_hex(sha256)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(exc),
+                )
+
+            if self.cas_adapter.has_asset(norm_sha256):
+                return {
+                    "status": "exists",
+                    "sha256": norm_sha256,
+                    "size_bytes": self.cas_adapter.get_asset_size(norm_sha256) or 0,
+                }
+
+            staging_dir = self.cas_adapter.get_staging_dir()
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(prefix=f"upload_{norm_sha256[:12]}_", suffix=".tmp", dir=str(staging_dir))
+            tmp_path = Path(tmp_name)
+            hasher = hashlib.sha256()
+            total_bytes = 0
+
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    async for chunk in request.stream():
+                        if chunk:
+                            f.write(chunk)
+                            hasher.update(chunk)
+                            total_bytes += len(chunk)
+
+                actual_hash = hasher.hexdigest().lower()
+                if actual_hash != norm_sha256:
+                    tmp_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"SHA-256 mismatch: expected {norm_sha256}, got {actual_hash}",
+                    )
+
+                self.cas_adapter.commit_staged_file(tmp_path, norm_sha256)
+                return {
+                    "status": "stored",
+                    "sha256": norm_sha256,
+                    "size_bytes": total_bytes,
+                }
+            except HTTPException:
+                tmp_path.unlink(missing_ok=True)
+                raise
+            except Exception as exc:
+                tmp_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to store uploaded asset: {exc}",
+                )
 
         # ====================================================================
         # Diagnostic & Control Plane Endpoints

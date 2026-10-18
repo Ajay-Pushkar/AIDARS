@@ -67,28 +67,42 @@ class FFmpegAdapter(ApplicationAdapter):
         spec.execution_spec = self.build_execution_spec(spec)
         return [spec]
         
-    def build_execution_spec(self, workload: WorkloadSpec) -> ExecutionSpec:
-        video_hash = workload.parameters.get("video_hash")
-        input_video = workload.parameters.get("input_video_path") or "input.mp4"
-        output_format = workload.parameters.get("output_format", "mp4")
-        
-        video_arg = f"inputs/{video_hash}" if video_hash else str(input_video)
-            
-        args = [
-            "-y", # Overwrite outputs
-            "-i", video_arg,
-            "-c:v", "libx264", # Force a common encoder for test stability
-            "-preset", "ultrafast", # Faster tests
-            "-t", "1", # Process max 1 second to keep tests fast
-            f"./outputs/transcoded.{output_format}"
-        ]
-        
+    def build_execution_spec(self, spec: WorkloadSpec) -> ExecutionSpec:
+        """Build the generic subprocess execution specification for FFmpeg."""
+        input_hashes = sorted(spec.input_asset_hashes)
+        input_hash = input_hashes[0] if input_hashes else "missing_input"
+        codec = str(spec.parameters.get("codec", "libx264"))
+        resolution = str(spec.parameters.get("resolution", "1920x1080"))
+        output_format = str(spec.parameters.get("output_format", "mp4"))
+        ffmpeg_exec = str(spec.parameters.get("ffmpeg_executable", "ffmpeg"))
+
+        start_time = spec.parameters.get("start_time")
+        duration = spec.parameters.get("duration")
+
+        args: List[str] = ["-y"]
+        if start_time is not None:
+            args.extend(["-ss", str(start_time)])
+
+        args.extend(["-i", f"inputs/{input_hash}"])
+
+        if duration is not None and float(duration) > 0:
+            args.extend(["-t", str(duration)])
+
+        args.extend([
+            "-c:v", codec,
+            "-vf", f"scale={resolution}",
+            f"outputs/output_{spec.workload_id}.{output_format}",
+        ])
+
         return ExecutionSpec(
-            executable="ffmpeg", # Real local executable
+            command=ffmpeg_exec,
             args=args,
-            env={},
-            cwd=None,
-            timeout_seconds=workload.estimated_duration_seconds * 3.0
+            env={"AIDAR_ADAPTER": "ffmpeg"},
+            expected_output_Loading=[],
+        ) if "expected_output_Loading" in ExecutionSpec.model_fields else ExecutionSpec(
+            command=ffmpeg_exec,
+            args=args,
+            env={"AIDAR_ADAPTER": "ffmpeg"},
         )
 
     def describe_expected_outputs(self, workload: WorkloadSpec) -> OutputVerificationPolicy:

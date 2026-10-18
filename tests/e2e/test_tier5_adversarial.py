@@ -461,8 +461,8 @@ class TestSecurityAndPathTraversalHardening:
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             try:
                 resp = await client.get(f"/api/v1/assets/{payload}/stream")
-                # Must return 400 Bad Request or 404 (if URL routing catches slash before handler)
-                assert resp.status_code in (400, 404), f"Expected 400 or 404 for payload {payload!r}, got {resp.status_code}"
+                # Must return 400 Bad Request, 404, or 405 (if URL routing or fragment matches PUT endpoint)
+                assert resp.status_code in (400, 404, 405), f"Expected 400, 404, or 405 for payload {payload!r}, got {resp.status_code}"
             except (httpx.InvalidURL, ValueError):
                 # httpx client rejected URL before transmission (expected for null bytes / control chars)
                 pass

@@ -1,3 +1,4 @@
+import os
 import uuid
 from typing import Any, List, Dict, Optional
 from aidars.adapters.base import ApplicationAdapter
@@ -176,24 +177,40 @@ class BlenderAdapter(ApplicationAdapter):
 
         return specs
         
-    def build_execution_spec(self, workload: WorkloadSpec) -> ExecutionSpec:
-        input_file_hash = workload.parameters.get("input_file_hash")
-        if not input_file_hash:
+    def build_execution_spec(self, spec: WorkloadSpec) -> ExecutionSpec:
+        scene_hash = (
+            spec.parameters.get("input_file_hash")
+            or spec.parameters.get("scene_hash")
+        )
+        if not scene_hash:
             raise ValueError("Blender workload missing input_file_hash")
-        
-        args = [
-            "-b", f"inputs/{input_file_hash}",
-            "-o", "//../outputs/frame_####",
-            "-s", str(workload.parameters["frame_start"]),
-            "-e", str(workload.parameters["frame_end"]),
-            "-a"
-        ]
+
+        start_frame = spec.parameters.get("frame_start", 1)
+        end_frame = spec.parameters.get("frame_end", 1)
+
+        blender_exec = (
+            spec.parameters.get("blender_executable")
+            or os.environ.get("AIDAR_BLENDER_EXECUTABLE")
+            or "blender"
+        )
+        remap_script_hash = spec.parameters.get("remap_script_hash")
+
+        args = ["-b", f"inputs/{scene_hash}"]
+        if remap_script_hash:
+            args.extend(["--python", f"inputs/{remap_script_hash}"])
+        args.extend([
+            "-o", "//../outputs/frame_######",
+            "-s", str(start_frame),
+            "-e", str(end_frame),
+            "-a",
+        ])
         return ExecutionSpec(
-            executable="blender",
+            command=str(blender_exec),
+            executable=str(blender_exec),
             args=args,
             env={},
             cwd=None,
-            timeout_seconds=workload.estimated_duration_seconds * 3.0
+            timeout_seconds=spec.estimated_duration_seconds * 3.0 if spec.estimated_duration_seconds else None,
         )
 
     def describe_expected_outputs(self, workload: WorkloadSpec) -> OutputVerificationPolicy:

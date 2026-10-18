@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import Dict, Tuple
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -230,3 +231,40 @@ class TestWorkerServerControlPlane:
         resp_post = client.post("/api/v1/ping", json=req.model_dump())
         assert resp_post.status_code == 200
         assert resp_post.json()["sequence_number"] == 42
+
+
+@pytest.mark.asyncio
+async def test_worker_server_put_asset_and_client_upload(tmp_path: Path):
+    cas = LocalCASAdapter(tmp_path / "cas")
+    server = WorkerServer(worker_id="w-upload", cas_adapter=cas)
+
+    payload = b"multi-pc-lan-test-payload"
+    expected_sha256 = hashlib.sha256(payload).hexdigest()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://testworker") as http_c:
+        # 1. Clean upload via PUT /api/v1/assets/{sha256}
+        resp = await http_c.put(f"/api/v1/assets/{expected_sha256}", content=payload)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "stored"
+        assert cas.has_asset(expected_sha256) is True
+
+        # 2. Idempotent re-upload returns status "exists"
+        resp_exists = await http_c.put(f"/api/v1/assets/{expected_sha256}", content=payload)
+        assert resp_exists.status_code == 200
+        assert resp_exists.json()["status"] == "exists"
+
+        # 3. Corrupted bytes with wrong SHA-256 returns 400 and is not stored
+        corrupted_payload = b"corrupted-payload-data"
+        wrong_sha256 = "0" * 64
+        resp_corrupt = await http_c.put(f"/api/v1/assets/{wrong_sha256}", content=corrupted_payload)
+        assert resp_corrupt.status_code == 400
+        assert cas.has_asset(wrong_sha256) is False
+
+        # 4. Also test DistributedClient.upload_asset method
+        from aidars.distributed.client import DistributedClient
+        dist_client = DistributedClient(http_client=http_c)
+        client_payload = b"client-upload-test-payload"
+        client_hash = hashlib.sha256(client_payload).hexdigest()
+        result_hash = await dist_client.upload_asset("http://testworker", client_payload)
+        assert result_hash == client_hash
+        assert cas.has_asset(client_hash) is True

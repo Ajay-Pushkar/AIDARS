@@ -102,6 +102,34 @@ class GenericSubprocessRuntime(RuntimeAdapter):
         if context is not None:
             environment = os.environ.copy()
             environment["AIDAR_EXECUTION_CONTEXT"] = json.dumps(context.model_dump(mode="json"))
+            environment["AIDAR_RANK"] = str(context.rank)
+            environment["AIDAR_WORLD_SIZE"] = str(context.world_size)
+
+            from urllib.parse import urlsplit
+
+            execution_context = context
+            env = environment
+            env["RANK"] = str(execution_context.rank)
+            env["LOCAL_RANK"] = "0"
+            env["WORLD_SIZE"] = str(execution_context.world_size)
+            if execution_context.workers:
+                leader_entry = next(
+                    (w for w in execution_context.workers if w.get("rank") == 0),
+                    execution_context.workers[0],
+                )
+                leader_url = str(leader_entry.get("endpoint_url", ""))
+                parsed_leader = urlsplit(leader_url)
+                master_host = parsed_leader.hostname or "127.0.0.1"
+                master_port = str((parsed_leader.port or 8000) + 10000)
+                env.setdefault("AIDAR_MASTER_ADDR", master_host)
+                env.setdefault("AIDAR_MASTER_PORT", master_port)
+                env.setdefault("MASTER_ADDR", master_host)
+                env.setdefault("MASTER_PORT", master_port)
+                peer_ips = [
+                    urlsplit(str(w.get("endpoint_url", ""))).hostname or "127.0.0.1"
+                    for w in execution_context.workers
+                ]
+                env.setdefault("AIDAR_PEER_IPS", ",".join(peer_ips))
             
         try:
             if spec.execution_spec:

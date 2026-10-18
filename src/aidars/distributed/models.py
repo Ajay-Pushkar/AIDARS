@@ -704,11 +704,24 @@ class ExecutionSpec(BaseModel):
     
     model_config = ConfigDict(extra="ignore")
     
-    executable: str = Field(..., min_length=1)
+    executable: str = Field(default="", min_length=0)
     args: List[str] = Field(default_factory=list)
     env: Dict[str, str] = Field(default_factory=dict)
     cwd: Optional[str] = Field(default=None)
     timeout_seconds: Optional[float] = Field(default=None, gt=0)
+    command: Optional[str] = Field(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _unify_command_executable(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            cmd = data.get("command")
+            exe = data.get("executable")
+            if cmd and not exe:
+                data["executable"] = cmd
+            elif exe and not cmd:
+                data["command"] = exe
+        return data
 
 
 class ExecutionSubmitRequest(BaseModel):

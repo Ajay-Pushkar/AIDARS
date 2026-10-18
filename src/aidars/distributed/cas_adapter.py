@@ -62,6 +62,10 @@ class CASAdapter(Protocol):
         """Enumerate all cached hashes in local CAS."""
         ...
 
+    def get_staging_dir(self) -> Path:
+        """Return path to staging directory."""
+        ...
+
 
 class LocalCASAdapter:
     """Thread-safe local filesystem Content Addressed Storage (CAS) adapter.
@@ -84,6 +88,10 @@ class LocalCASAdapter:
 
         self.objects_dir.mkdir(parents=True, exist_ok=True)
         self.staging_dir.mkdir(parents=True, exist_ok=True)
+
+    def get_staging_dir(self) -> Path:
+        """Return the staging directory path."""
+        return self.staging_dir
 
     def _get_path_for_hash(self, sha256_hex: str) -> Path:
         """Resolve content-addressed path for a 64-hex SHA-256 digest with 2-char sharding."""

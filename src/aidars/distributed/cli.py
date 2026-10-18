@@ -23,10 +23,21 @@ import argparse
 import asyncio
 import logging
 import os
+import shutil
 import sys
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
+
+
+def detect_local_capabilities() -> List[str]:
+    """Fast, non-blocking local binary capability probe for worker startup."""
+    caps: List[str] = ["python"]
+    if shutil.which("blender") or os.environ.get("AIDAR_BLENDER_EXECUTABLE"):
+        caps.append("blender")
+    if shutil.which("ffmpeg"):
+        caps.append("ffmpeg")
+    return caps
 
 
 def _env_float(name: str, default: float) -> float:

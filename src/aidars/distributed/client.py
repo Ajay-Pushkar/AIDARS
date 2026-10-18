@@ -7,10 +7,13 @@ incremental SHA-256 verification, and automatic candidate fail-over.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import os
 import time
 import uuid
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Union
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import httpx
 
@@ -76,6 +79,7 @@ class DistributedClient:
             timeout=httpx.Timeout(default_timeout_seconds, connect=10.0),
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
+        self._http_client = self.http_client
 
     # ========================================================================
     # Lifecycle Context Management
@@ -347,3 +351,97 @@ class DistributedClient:
                 )
 
         return results
+
+    async def upload_asset(
+        self,
+        worker_endpoint_url: str,
+        data_or_path: Union[bytes, Path, str],
+        token: Optional[str] = None,
+        timeout_seconds: float = 60.0,
+    ) -> str:
+        """Upload raw bytes or a local file into a worker's CAS via PUT /api/v1/assets/{sha256}."""
+        if isinstance(data_or_path, (Path, str)):
+            file_path = Path(data_or_path)
+            payload = file_path.read_bytes()
+        else:
+            payload = bytes(data_or_path)
+
+        sha256 = hashlib.sha256(payload).hexdigest().lower()
+        clean_url = worker_endpoint_url.strip().rstrip("/")
+        put_url = f"{clean_url}/api/v1/assets/{sha256}"
+
+        headers: Dict[str, str] = {"Content-Type": "application/octet-stream"}
+        auth_token = token if token is not None else os.environ.get("AIDAR_WORKER_BOOTSTRAP_SECRET", "").strip()
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+
+        client = self._http_client or httpx.AsyncClient()
+        close_after = self._http_client is None
+        try:
+            resp = await client.put(put_url, content=payload, headers=headers, timeout=timeout_seconds)
+            resp.raise_for_status()
+            return sha256
+        finally:
+            if close_after:
+                await client.aclose()
+
+    async def pull_job_artifacts(
+        self,
+        coordinator_url: str,
+        job_id: str,
+        output_dir: Union[Path, str],
+        admin_token: Optional[str] = None,
+        timeout_seconds: float = 60.0,
+    ) -> Dict[str, Path]:
+        """Locate and download all output_asset_hashes for a completed job into output_dir."""
+        out_root = Path(output_dir)
+        out_root.mkdir(parents=True, exist_ok=True)
+        clean_coord = coordinator_url.strip().rstrip("/")
+
+        headers: Dict[str, str] = {}
+        tok = admin_token if admin_token is not None else os.environ.get("AIDAR_ADMIN_TOKENS", "").split(",")[0].strip()
+        if tok:
+            headers["Authorization"] = f"Bearer {tok}"
+
+        client = self._http_client or httpx.AsyncClient()
+        close_after = self._http_client is None
+        saved_files: Dict[str, Path] = {}
+        try:
+            job_resp = await client.get(f"{clean_coord}/api/v1/jobs/{job_id}", headers=headers, timeout=timeout_seconds)
+            job_resp.raise_for_status()
+            job_data = job_resp.json()
+            output_hashes: List[str] = list(job_data.get("output_asset_hashes", []))
+            if not output_hashes:
+                return saved_files
+
+            loc_resp = await client.post(
+                f"{clean_coord}/api/v1/assets/locate",
+                json={"requester_worker_id": "client-pull", "missing_hashes": output_hashes},
+                headers=headers,
+                timeout=timeout_seconds,
+            )
+            loc_resp.raise_for_status()
+            locations = loc_resp.json().get("locations", {})
+
+            for h in output_hashes:
+                candidates = locations.get(h, [])
+                if not candidates:
+                    continue
+                for cand in candidates:
+                    ep = cand["endpoint_url"].rstrip("/")
+                    stream_url = f"{ep}/api/v1/assets/{h}/stream"
+                    try:
+                        dl_resp = await client.get(stream_url, timeout=timeout_seconds)
+                        dl_resp.raise_for_status()
+                        content = dl_resp.content
+                        if hashlib.sha256(content).hexdigest().lower() == h.lower():
+                            dest = out_root / h
+                            dest.write_bytes(content)
+                            saved_files[h] = dest
+                            break
+                    except Exception:
+                        continue
+            return saved_files
+        finally:
+            if close_after:
+                await client.aclose()
