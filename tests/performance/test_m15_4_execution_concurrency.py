@@ -25,6 +25,9 @@ class DummyRuntime(RuntimeAdapter):
     async def checkpoint(self):
         pass
 
+    async def cancel(self):
+        pass
+
 async def event_loop_probe(stop_event: asyncio.Event, intervals_ms: list):
     while not stop_event.is_set():
         start = time.perf_counter()

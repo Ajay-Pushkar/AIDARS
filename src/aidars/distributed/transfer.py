@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import BinaryIO, Callable, Iterator, List, Optional, Tuple, Union
 
 import httpx
-
+from aidars.cache.models import HashMismatchError
 from aidars.distributed.cas_adapter import CASAdapter
 from aidars.distributed.models import (
     CandidateSource,
@@ -236,6 +236,7 @@ async def download_stream_to_staging(
     offset: int = 0,
     timeout_seconds: float = 30.0,
     progress_callback: Optional[Callable[[int, Optional[int]], None]] = None,
+    resume_staging_path: Optional[Path] = None,
 ) -> Tuple[Path, str, int]:
     """Stream a binary asset from a peer endpoint directly to a disk staging file.
 
@@ -260,6 +261,22 @@ async def download_stream_to_staging(
 
     with StagingContext(staging_dir, norm_sha256) as stg:
         try:
+            hasher = hashlib.sha256()
+            has_prefix_on_disk = False
+
+            # If resuming from a local partial staging file, prepend its bytes
+            # into both the new staging file and the running SHA-256 digest.
+            if offset > 0 and resume_staging_path is not None and resume_staging_path.exists():
+                if resume_staging_path.stat().st_size == offset:
+                    with resume_staging_path.open("rb") as prev_f, stg.path.open("wb") as out_f:
+                        while True:
+                            buf = prev_f.read(chunk_size)
+                            if not buf:
+                                break
+                            hasher.update(buf)
+                            out_f.write(buf)
+                    has_prefix_on_disk = True
+
             async with client.stream(
                 "GET", stream_url, headers=headers, timeout=timeout_seconds
             ) as response:
@@ -276,6 +293,11 @@ async def download_stream_to_staging(
                         sha256=norm_sha256,
                     )
 
+                # If server ignored Range and returned 200 OK, reset prefix state
+                if response.status_code == 200 and has_prefix_on_disk:
+                    hasher = hashlib.sha256()
+                    has_prefix_on_disk = False
+
                 expected_bytes: Optional[int] = None
                 cl_header = response.headers.get("content-length")
                 if cl_header:
@@ -284,10 +306,10 @@ async def download_stream_to_staging(
                     except ValueError:
                         pass
 
-                hasher = hashlib.sha256()
                 bytes_received = 0
+                file_mode = "ab" if (response.status_code == 206 and has_prefix_on_disk) else "wb"
 
-                with stg.path.open("wb") as f_out:
+                with stg.path.open(file_mode) as f_out:
                     async for chunk in response.aiter_bytes(chunk_size=chunk_size):
                         if not chunk:
                             continue
@@ -308,8 +330,9 @@ async def download_stream_to_staging(
 
                 actual_hash = hasher.hexdigest().lower()
 
-                # For full stream (offset == 0), verify SHA-256 matches expected
-                if offset == 0 and actual_hash != norm_sha256:
+                # Verify full-file SHA-256 when downloading from byte 0, when prefix was prepended,
+                # or when peer ignored Range and returned a full 200 OK body.
+                if (offset == 0 or has_prefix_on_disk or response.status_code == 200) and actual_hash != norm_sha256:
                     raise IntegrityError(
                         f"SHA-256 checksum mismatch: expected {norm_sha256}, got {actual_hash}",
                         expected_sha256=norm_sha256,
@@ -332,7 +355,6 @@ async def download_stream_to_staging(
                 f"Unexpected error streaming from {endpoint_url}: {exc}",
                 sha256=norm_sha256,
             ) from exc
-
 
 # ============================================================================
 # Asset Transfer Pipeline Functions

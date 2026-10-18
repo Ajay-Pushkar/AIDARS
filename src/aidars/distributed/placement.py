@@ -237,7 +237,12 @@ class PlacementEngine:
                 continue
 
             c_w = avail_cpu / spec.min_cpu_cores
-            m_w = p.ram_available_bytes / max(1, spec.min_ram_bytes)
+            # Clamp normalized RAM headroom to [0.0, 2.0] (matching d_w's scale)
+            # so small min_ram_bytes specs do not dominate locality and M7 risk.
+            if spec.min_ram_bytes and spec.min_ram_bytes > 0:
+                m_w = min(2.0, p.ram_available_bytes / float(spec.min_ram_bytes))
+            else:
+                m_w = min(2.0, p.ram_available_bytes / float(max(1, p.ram_total_bytes)) * 2.0)
             # Keep the verified M6 score formula intact; generic M11 GPU
             # constraints affect hard eligibility, not the historical M6 term.
             g_w = (1.0 + p.vram_available_bytes / max(1, spec.min_vram_bytes)

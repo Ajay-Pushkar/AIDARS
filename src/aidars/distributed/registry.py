@@ -238,6 +238,19 @@ class WorkerRegistry:
             if not worker:
                 return None
             return worker.model_copy(deep=True) if copy else worker
+        
+    def set_worker_status(self, worker_id: str, status: WorkerStatus) -> bool:
+        """Thread-safely update a worker's status and persist to state_store."""
+        with self._lock:
+            worker = self._workers.get(worker_id)
+            if worker is None:
+                return False
+            if worker.status == status:
+                return True
+            worker.status = status
+            if self._state_store is not None:
+                self._state_store.save_worker(worker)
+            return True
 
     def get_workers_map(self) -> Dict[str, WorkerInfo]:
         """Return a snapshot dictionary mapping worker_id -> WorkerInfo internal references under a single lock read."""

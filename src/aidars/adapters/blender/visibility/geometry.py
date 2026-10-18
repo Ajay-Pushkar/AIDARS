@@ -21,9 +21,10 @@ class BoundingBox:
     min_pt: Tuple[float, float, float]
     max_pt: Tuple[float, float, float]
     corners: List[Tuple[float, float, float]] = field(default_factory=list)
+    is_solid_opaque: bool = True
 
     @classmethod
-    def from_corners(cls, corners: List[Tuple[float, float, float]]) -> BoundingBox:
+    def from_corners(cls, corners: List[Tuple[float, float, float]], is_solid_opaque: bool = True) -> BoundingBox:
         if not corners:
             corners = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
         min_x = min(p[0] for p in corners)
@@ -32,7 +33,7 @@ class BoundingBox:
         max_x = max(p[0] for p in corners)
         max_y = max(p[1] for p in corners)
         max_z = max(p[2] for p in corners)
-        return cls(min_pt=(min_x, min_y, min_z), max_pt=(max_x, max_y, max_z), corners=corners)
+        return cls(min_pt=(min_x, min_y, min_z), max_pt=(max_x, max_y, max_z), corners=corners, is_solid_opaque=is_solid_opaque)
 
 
 class FrustumCuller:
@@ -63,7 +64,8 @@ class FrustumCuller:
             )
             world_corners.append(world_pt)
 
-        return BoundingBox.from_corners(world_corners)
+        is_solid = bool(obj_dict.get("is_solid_opaque", True))
+        return BoundingBox.from_corners(world_corners, is_solid_opaque=is_solid)
 
     @classmethod
     def test_frustum(
@@ -172,6 +174,8 @@ class FrustumCuller:
             point_is_blocked = False
 
             for blocker in opaque_blockers:
+                if not getattr(blocker, "is_solid_opaque", True):
+                    continue
                 b_min = blocker.min_pt
                 b_max = blocker.max_pt
 
@@ -189,6 +193,9 @@ class FrustumCuller:
                 return False
 
         return True
+
+
+
 
     @staticmethod
     def _world_to_cam_space(
@@ -301,3 +308,65 @@ class FrustumCuller:
             except (ValueError, TypeError):
                 return default
         return default
+
+
+def _aabb_strictly_occludes_target(
+    target_aabb: Dict[str, Any],
+    occ_aabb: Dict[str, Any],
+    camera_location: Tuple[float, float, float],
+) -> bool:
+    """Check if occluder strictly separates camera from target across all corner rays."""
+    cam_p = camera_location
+    t_corners = target_aabb.get("corners")
+    if not t_corners:
+        t_min = target_aabb.get("min_pt", (-0.5, -0.5, -0.5))
+        t_max = target_aabb.get("max_pt", (0.5, 0.5, 0.5))
+        t_corners = [
+            (t_min[0], t_min[1], t_min[2]), (t_min[0], t_min[1], t_max[2]),
+            (t_min[0], t_max[1], t_min[2]), (t_min[0], t_max[1], t_max[2]),
+            (t_max[0], t_min[1], t_min[2]), (t_max[0], t_min[1], t_max[2]),
+            (t_max[0], t_max[1], t_min[2]), (t_max[0], t_max[1], t_max[2]),
+        ]
+    o_min = occ_aabb.get("min_pt", (-0.5, -0.5, -0.5))
+    o_max = occ_aabb.get("max_pt", (0.5, 0.5, 0.5))
+
+    cx = sum(p[0] for p in t_corners) / len(t_corners)
+    cy = sum(p[1] for p in t_corners) / len(t_corners)
+    cz = sum(p[2] for p in t_corners) / len(t_corners)
+    sample_points = [(cx, cy, cz)] + list(t_corners)
+
+    for sp in sample_points:
+        vx = sp[0] - cam_p[0]
+        vy = sp[1] - cam_p[1]
+        vz = sp[2] - cam_p[2]
+        dist_to_target = math.sqrt(vx * vx + vy * vy + vz * vz)
+        if dist_to_target < 1e-6:
+            return False
+        ray_dir = (vx / dist_to_target, vy / dist_to_target, vz / dist_to_target)
+        if FrustumCuller._point_in_aabb(cam_p, o_min, o_max):
+            return False
+        hit_t = FrustumCuller._ray_intersects_aabb(cam_p, ray_dir, o_min, o_max)
+        if hit_t is None or not (1e-4 < hit_t < dist_to_target - 1e-4):
+            return False
+    return True
+
+
+def is_occluded(
+    target_aabb: Dict[str, Any],
+    occluder_aabbs: List[Dict[str, Any]],
+    camera_location: Tuple[float, float, float],
+) -> bool:
+    """Conservative AABB occlusion check enforcing Uncertain -> KEEP.
+
+    An occluder AABB is only allowed to cull a target if it is explicitly marked
+    `is_solid_opaque=True` (verified closed convex opaque geometry) and strictly
+    separates the camera from the target AABB.
+    """
+    if not occluder_aabbs:
+        return False
+    for occ in occluder_aabbs:
+        if not occ.get("is_solid_opaque", False):
+            continue
+        if _aabb_strictly_occludes_target(target_aabb, occ, camera_location):
+            return True
+    return False

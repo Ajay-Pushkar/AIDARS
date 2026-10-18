@@ -43,6 +43,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     image: aidars:latest
+    init: true
     command: ["aidars-worker"]
     environment: &worker_env
       AIDAR_WORKER_BIND_HOST: "0.0.0.0"

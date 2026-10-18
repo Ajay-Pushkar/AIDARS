@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -121,6 +122,7 @@ class CoordinatorService:
         eviction_interval_seconds: float = 5.0,
         penalty_decay_interval_seconds: float = 30.0,
         artifact_gc_interval_seconds: float = 60.0,
+        artifact_retention_seconds: Optional[float] = None,
         registry: Optional[WorkerRegistry] = None,
         prioritizer: Optional[CandidatePrioritizer] = None,
         latency_tracker: Optional[LatencyTracker] = None,
@@ -133,6 +135,10 @@ class CoordinatorService:
         self.eviction_interval_seconds = float(eviction_interval_seconds)
         self.penalty_decay_interval_seconds = float(penalty_decay_interval_seconds)
         self.artifact_gc_interval_seconds = float(artifact_gc_interval_seconds)
+        if artifact_retention_seconds is None:
+            self.artifact_retention_seconds = float(os.environ.get("AIDAR_ARTIFACT_RETENTION_SECONDS", 0.0))
+        else:
+            self.artifact_retention_seconds = float(artifact_retention_seconds)
 
         # Optional coordinator-state persistence/recovery (Phase 5.2C).
         # None (the default) preserves pure in-memory behavior exactly as
@@ -419,8 +425,6 @@ class CoordinatorService:
         """
         for workload_id in workload_ids:
             record = self.workload_registry.get_workload(workload_id)
-            print("API RECORD EXPLANATION:", record.placement_explanation if record else None)
-            print("API RECORD DECISION:", record.placement_decision if record else None)
             if record is not None and record.state not in TERMINAL_WORKLOAD_STATES:
                 # Re-enter the single admission queue while preserving the durable
                 # WorkloadRecord and its original submitted_at age.
@@ -480,7 +484,6 @@ class CoordinatorService:
                     
                 # Evaluate cluster policy using M7 memory
                 active_workers = list(self.m7_memory.workers.values())
-                print(f"DEBUG LOOP: Evaluated {len(active_workers)} active workers")
                 
                 # Check for Early Warnings (M7.16)
                 for worker_state in active_workers:
@@ -508,7 +511,7 @@ class CoordinatorService:
                         worker_info = self.registry.get_worker(wid)
                         if worker_info and worker_info.status == WorkerStatus.ACTIVE:
                             logger.warning(f"Worker {wid} marked as DRAINING due to M7 behavioral risk: {behavior.state.value}")
-                            self.registry._workers[wid].status = WorkerStatus.DRAINING
+                            self.registry.set_worker_status(wid, WorkerStatus.DRAINING)
                             # Kick off workload migration for all active workloads on this worker (M7.18)
                             asyncio.create_task(self.orchestrator.drain_worker(wid))
                     elif behavior.state == M7WorkerState.STABLE:
@@ -527,7 +530,7 @@ class CoordinatorService:
                         worker_info = self.registry.get_worker(wid)
                         if worker_info and worker_info.status == WorkerStatus.DRAINING:
                             logger.info(f"Worker {wid} behavioral risk recovered to STABLE; reviving DRAINING -> ACTIVE")
-                            self.registry._workers[wid].status = WorkerStatus.ACTIVE
+                            self.registry.set_worker_status(wid, WorkerStatus.ACTIVE)
 
             except Exception as exc:
                 logger.error("Coordinator health loop error: %s", exc)
@@ -558,13 +561,15 @@ class CoordinatorService:
                     for aid in eligible_to_delete:
                         self.artifact_registry.mark_deleted(aid)
 
-                    # 3. Transition AVAILABLE -> GC_ELIGIBLE for non-terminal jobs
+                    # 3. Transition AVAILABLE -> GC_ELIGIBLE for non-terminal jobs or within retention grace window
+                    now = time.time()
                     protected_job_ids = set()
                     if self.job_registry is not None:
                         for job in self.job_registry.list_jobs():
                             agg = self.job_registry.get_aggregate(job.job_id)
-                            if agg is not None and not agg.is_terminal:
-                                protected_job_ids.add(job.job_id)
+                            if agg is not None:
+                                if not agg.is_terminal or (self.artifact_retention_seconds > 0 and (now - job.created_at) < self.artifact_retention_seconds):
+                                    protected_job_ids.add(job.job_id)
 
                     newly_eligible = self.artifact_registry.compute_gc_eligible(protected_job_ids)
                     if newly_eligible:

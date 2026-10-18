@@ -11,7 +11,9 @@ import os
 import shutil
 import time
 from typing import Dict, Optional, Set
+import re
 
+_SAFE_WORKLOAD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:#-]{0,127}$")
 from aidars.distributed.cas_adapter import LocalCASAdapter
 from aidars.distributed.checkpoint import CURRENT_CHECKPOINT_FORMAT_VERSION
 from aidars.distributed.models import FailureCategory, RuntimeExecutionContext, WorkloadExecutionResult, WorkloadSpec
@@ -29,13 +31,34 @@ class ExecutionManager:
         self.active_runtimes: Dict[str, RuntimeAdapter] = {}
         os.makedirs(self.workloads_dir, exist_ok=True)
 
+    def _resolve_sandbox_dir(self, workload_id: str) -> str:
+        """Validate workload_id and enforce strict containment inside self.workloads_dir."""
+        if not workload_id or not _SAFE_WORKLOAD_ID_RE.match(workload_id) or ".." in workload_id:
+            raise ValueError(f"Unsafe workload_id rejected: {workload_id!r}")
+        real_root = os.path.realpath(self.workloads_dir)
+        candidate = os.path.realpath(os.path.join(real_root, workload_id))
+        if os.path.commonpath([real_root, candidate]) != real_root or candidate == real_root:
+            raise ValueError(f"Sandbox path escapes workloads_dir: {workload_id!r}")
+        return candidate
+
     async def execute_workload(
         self, spec: WorkloadSpec, worker_id: str, runtime: RuntimeAdapter,
         execution_context: Optional[RuntimeExecutionContext] = None,
     ) -> WorkloadExecutionResult:
         """Execute a workload from start to finish."""
         workload_id = spec.workload_id
-        workdir = os.path.join(self.workloads_dir, workload_id)
+        try:
+            workdir = self._resolve_sandbox_dir(workload_id)
+        except ValueError as exc:
+            return WorkloadExecutionResult(
+                workload_id=workload_id,
+                worker_id=worker_id,
+                success=False,
+                output_asset_hashes=set(),
+                execution_duration_seconds=0.0,
+                error_message=f"Invalid workload sandbox directory: {exc}",
+                failure_category=FailureCategory.INPUT_VALIDATION_ERROR,
+            )
         
         inputs_dir = os.path.join(workdir, "inputs")
         outputs_dir = os.path.join(workdir, "outputs")
@@ -88,9 +111,11 @@ class ExecutionManager:
                     # In a real environment, hardlink or symlink to save space.
                     # Copying for Windows compatibility fallback.
                     try:
+                        os.chmod(asset_path, 0o444)
                         os.link(asset_path, dest_path)
                     except OSError:
                         shutil.copy2(asset_path, dest_path)
+                        os.chmod(dest_path, 0o444)
                 except Exception as exc:
                     return WorkloadExecutionResult(
                         workload_id=workload_id,
@@ -278,7 +303,7 @@ class ExecutionManager:
             stdout_snippet=stdout_snip,
             stderr_snippet=stderr_snip,
             was_checkpointed=was_checkpointed,
-            checkpoint_hash=next(iter(output_hashes)) if (was_checkpointed and output_hashes) else None,
+            checkpoint_hash=sorted(output_hashes)[0] if (was_checkpointed and output_hashes) else None,
             checkpoint_runtime_type=type(runtime).__name__ if was_checkpointed else None,
             checkpoint_format_version=CURRENT_CHECKPOINT_FORMAT_VERSION if was_checkpointed else None,
             failure_category=failure_category,

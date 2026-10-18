@@ -1,8 +1,11 @@
-import json
 import hashlib
-from typing import Any, List, Dict
+import json
+import uuid
+import os
+from typing import Any, List, Dict, Optional
 from aidars.adapters.base import ApplicationAdapter
 from aidars.distributed.models import WorkloadSpec, ExecutionSpec, OutputVerificationPolicy
+
 
 class LLMAdapter(ApplicationAdapter):
     """LLM inference adapter implementing the generic contract.
@@ -17,12 +20,11 @@ class LLMAdapter(ApplicationAdapter):
         """Validate LLM specific request."""
         if "prompt" not in request:
             return False
-        if "model_path" not in request:
-            return False
         return True
 
     def evaluate_request(self, request: dict) -> List[WorkloadSpec]:
         """Parse LLM request, calculate requirements, and output WorkloadSpec."""
+        model_identifier = request.get("model") or request.get("model_identifier") or request.get("model_path") or "default-model"
         model_path = request.get("model_path")
         prompt = request.get("prompt", "")
         max_tokens = request.get("max_tokens", 256)
@@ -31,22 +33,18 @@ class LLMAdapter(ApplicationAdapter):
         # M4: Physical asset resolution
         input_asset_hashes = set()
         model_hash = None
-        if model_path:
-            import os
-            import hashlib
-            if os.path.exists(model_path) and os.path.isfile(model_path):
-                hasher = hashlib.sha256()
-                with open(model_path, "rb") as f:
-                    while chunk_data := f.read(65536):
-                        hasher.update(chunk_data)
-                model_hash = hasher.hexdigest()
-                input_asset_hashes.add(model_hash)
-                if self.asset_manager:
-                    self.asset_manager.upload_asset_file(model_path, model_hash)
+        if model_path and os.path.exists(model_path) and os.path.isfile(model_path):
+            hasher = hashlib.sha256()
+            with open(model_path, "rb") as f:
+                while chunk_data := f.read(65536):
+                    hasher.update(chunk_data)
+            model_hash = hasher.hexdigest()
+            input_asset_hashes.add(model_hash)
+            if self.asset_manager:
+                self.asset_manager.upload_asset_file(model_path, model_hash)
 
         # Protect prompt from broad logs: use a generic prefix instead of embedding prompt text
         prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:8]
-        import uuid
         job_id = f"llm-job-{uuid.uuid4().hex[:16]}"
         
         # Estimate requirements based on parameters
@@ -64,26 +62,28 @@ class LLMAdapter(ApplicationAdapter):
             min_vram_bytes=min_vram_bytes,
             estimated_duration_seconds=float(max_tokens) * 0.5, # ~2 tok/sec fallback estimate
             parameters={
+                "model": model_identifier,
+                "model_identifier": model_identifier,
                 "model_hash": model_hash,
-                "prompt": prompt, # Kept in WorkloadSpec but runtime shouldn't log it
-                "max_tokens": max_tokens
+                "prompt": prompt,
+                "max_tokens": max_tokens,
             }
         )
+        spec.execution_spec = self.build_execution_spec(spec)
         return [spec]
         
     def build_execution_spec(self, workload: WorkloadSpec) -> ExecutionSpec:
         model_hash = workload.parameters.get("model_hash")
+        model = workload.parameters.get("model") or workload.parameters.get("model_identifier") or "default-model"
         prompt = workload.parameters.get("prompt", "")
         max_tokens = workload.parameters.get("max_tokens", 256)
         
-        if not model_hash:
-            raise ValueError("LLM workload missing model_hash")
+        model_arg = f"inputs/{model_hash}" if model_hash else str(model)
             
         args = [
-            "-m", f"inputs/{model_hash}",
+            "-m", model_arg,
             "-p", prompt,
             "-n", str(max_tokens),
-            # Write output to file in outputs/ directory
             "-o", "./outputs/response.txt"
         ]
         return ExecutionSpec(

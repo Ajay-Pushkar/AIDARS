@@ -17,13 +17,13 @@ class CustomScriptAdapter(ApplicationAdapter):
 
     def validate(self, request: dict) -> bool:
         """Validate custom script request."""
-        if "script_path" not in request:
+        if "script_path" not in request and "script" not in request:
             return False
         return True
 
     def evaluate_request(self, request: dict) -> List[WorkloadSpec]:
         """Parse request, calculate requirements, and output WorkloadSpec."""
-        script_path = request.get("script_path")
+        script_path = request.get("script_path") or request.get("script")
         args = request.get("args", [])
         expected_output_count = request.get("expected_output_count", 0)
         
@@ -55,21 +55,23 @@ class CustomScriptAdapter(ApplicationAdapter):
             min_vram_bytes=0,
             estimated_duration_seconds=30.0,
             parameters={
+                "script_path": script_path or "script.py",
                 "script_hash": script_hash,
                 "script_args": args,
                 "expected_output_count": expected_output_count
             }
         )
+        spec.execution_spec = self.build_execution_spec(spec)
         return [spec]
         
     def build_execution_spec(self, workload: WorkloadSpec) -> ExecutionSpec:
         script_hash = workload.parameters.get("script_hash")
+        script_path = workload.parameters.get("script_path") or "script.py"
         script_args = workload.parameters.get("script_args", [])
         
-        if not script_hash:
-            raise ValueError("Custom workload missing script_hash")
+        script_arg = f"inputs/{script_hash}" if script_hash else str(script_path)
             
-        args = [f"inputs/{script_hash}"] + script_args
+        args = [script_arg] + script_args
         
         return ExecutionSpec(
             executable=sys.executable, # Assume Python script for safety/portability

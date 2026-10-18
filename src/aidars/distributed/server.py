@@ -6,25 +6,37 @@ and leak-free resource cleanup on client aborts.
 """
 from __future__ import annotations
 
+import hmac
 import io
 import logging
+import os
 import time
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, FastAPI, Header, HTTPException, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import StreamingResponse
 
 from aidars.distributed.cas_adapter import CASAdapter
 from aidars.distributed.models import (
+    ExecutionStatus,
+    ExecutionSubmitRequest,
     PingRequest,
     PongResponse,
     WorkerCapabilities,
     WorkerMetrics,
-    validate_sha256_hex,
-    WorkloadSpec,
-    WorkloadExecutionResult,
     WorkloadExecutionRequest,
-    ExecutionSubmitRequest, ExecutionStatus,
+    WorkloadExecutionResult,
+    WorkloadSpec,
+    validate_sha256_hex,
 )
 from aidars.distributed.transfer import (
     DEFAULT_CHUNK_SIZE,
@@ -33,7 +45,6 @@ from aidars.distributed.transfer import (
 )
 
 logger = logging.getLogger(__name__)
-
 
 class WorkerServer:
     """Worker node server hosting data plane streaming and local control plane endpoints."""
@@ -61,6 +72,19 @@ class WorkerServer:
         self.app: FastAPI = self._create_fastapi_app()
 
     def _create_fastapi_app(self) -> FastAPI:
+        async def verify_control_plane_auth(request: Request) -> None:
+            """Enforce bearer token authentication on worker execution endpoints when secure mode is active."""
+            insecure = os.environ.get("AIDAR_INSECURE_MODE", "1").strip().lower() in ("1", "true", "yes")
+            expected_secret = os.environ.get("AIDAR_WORKER_BOOTSTRAP_SECRET", "").strip()
+            if insecure or not expected_secret:
+                return
+            auth_header = request.headers.get("authorization", "")
+            token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+            if not token or not hmac.compare_digest(token, expected_secret):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Missing or invalid worker control-plane credential",
+                )
         app = FastAPI(
             title=f"AIDAR Worker Data Plane ({self.worker_id})",
             description="High-throughput binary streaming server and worker REST APIs.",
@@ -167,16 +191,19 @@ class WorkerServer:
             chunk_size = self.capabilities.chunk_size_bytes or DEFAULT_CHUNK_SIZE
 
             def tracking_generator():
+                bytes_yielded = 0
                 try:
-                    yield from generate_bounded_chunks(
+                    for chunk in generate_bounded_chunks(
                         stream=stream,
                         bytes_to_send=content_length,
                         chunk_size=chunk_size,
-                    )
+                    ):
+                        bytes_yielded += len(chunk)
+                        yield chunk
                 finally:
                     self.metrics.active_transfers = max(0, self.metrics.active_transfers - 1)
                     self.metrics.active_uploads = max(0, self.metrics.active_uploads - 1)
-                    self.metrics.total_bytes_sent += content_length
+                    self.metrics.total_bytes_sent += bytes_yielded
 
             return StreamingResponse(
                 content=tracking_generator(),
@@ -241,7 +268,7 @@ class WorkerServer:
         # M20 asynchronous execution control plane. These requests are
         # deliberately short-lived; workload duration is never represented
         # by an HTTP request lifetime.
-        @router.post("/executions", response_model=ExecutionStatus, status_code=status.HTTP_202_ACCEPTED)
+        @router.post("/executions", response_model=ExecutionStatus, status_code=status.HTTP_202_ACCEPTED,dependencies=[Depends(verify_control_plane_auth)],)
         async def submit_execution(request: ExecutionSubmitRequest) -> ExecutionStatus:
             if not self.distributed_worker:
                 raise HTTPException(status_code=500, detail="Worker instance not linked to server")
@@ -258,7 +285,7 @@ class WorkerServer:
                 raise HTTPException(status_code=404, detail="Execution not found")
             return execution
 
-        @router.post("/executions/{attempt_id}/cancel", response_model=ExecutionStatus)
+        @router.post("/executions/{attempt_id}/cancel", response_model=ExecutionStatus,dependencies=[Depends(verify_control_plane_auth)],)
         async def cancel_execution(attempt_id: str) -> ExecutionStatus:
             if not self.distributed_worker:
                 raise HTTPException(status_code=500, detail="Worker instance not linked to server")
@@ -279,7 +306,7 @@ class WorkerServer:
                 raise HTTPException(status_code=404, detail="Execution not found")
             return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-        @router.post("/workloads/execute", response_model=WorkloadExecutionResult, summary="Execute a workload")
+        @router.post("/workloads/execute", response_model=WorkloadExecutionResult, summary="Execute a workload",dependencies=[Depends(verify_control_plane_auth)],)
         async def execute_workload_endpoint(spec: WorkloadSpec) -> WorkloadExecutionResult:
             if not self.distributed_worker:
                 raise HTTPException(status_code=500, detail="Worker instance not linked to server")
@@ -288,8 +315,7 @@ class WorkerServer:
             result = await self.distributed_worker.execute_workload(spec)
             return result
 
-        @router.post("/workloads/execute-group", response_model=WorkloadExecutionResult,
-                     summary="Execute one member of a distributed-native worker group")
+        @router.post("/workloads/execute-group", response_model=WorkloadExecutionResult,dependencies=[Depends(verify_control_plane_auth)],)
         async def execute_group_workload_endpoint(request: WorkloadExecutionRequest) -> WorkloadExecutionResult:
             if not self.distributed_worker:
                 raise HTTPException(status_code=500, detail="Worker instance not linked to server")
@@ -299,7 +325,7 @@ class WorkerServer:
                 request.spec, execution_context=request.execution_context,
             )
 
-        @router.post("/workloads/{workload_id}/checkpoint")
+        @router.post("/workloads/{workload_id}/checkpoint",dependencies=[Depends(verify_control_plane_auth)],)
         async def checkpoint_workload_endpoint(workload_id: str) -> Dict[str, Any]:
             if not self.distributed_worker:
                 raise HTTPException(status_code=500, detail="Worker instance not linked to server")
@@ -308,7 +334,7 @@ class WorkerServer:
                 raise HTTPException(status_code=404, detail="Workload not found or could not be checkpointed")
             return {"status": "checkpointing"}
 
-        @router.post("/workloads/{workload_id}/cancel")
+        @router.post("/workloads/{workload_id}/cancel", dependencies=[Depends(verify_control_plane_auth)],)
         async def cancel_workload_endpoint(workload_id: str) -> Dict[str, Any]:
             if not self.distributed_worker:
                 raise HTTPException(status_code=500, detail="Worker instance not linked to server")

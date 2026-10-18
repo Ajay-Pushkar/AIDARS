@@ -8,13 +8,14 @@ FROM python:3.11-slim AS base
 
 WORKDIR /app
 
-# Only the files needed to install the package -- keeps the build
-# context/layer cache tight and avoids shipping test fixtures, docs, or
-# the repo's ad hoc root-level dev scripts into the image.
+# 1. Install third-party dependencies in a cached layer first
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 2. Copy package metadata and source code
 COPY pyproject.toml README.md ./
 COPY src ./src
-
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --no-deps .
 
 # Runs as a non-root user; writable data directory for SQLite state /
 # CAS / workload sandboxes is created and owned by that user up front.

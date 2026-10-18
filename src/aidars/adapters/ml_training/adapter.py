@@ -1,8 +1,11 @@
 import json
 import hashlib
-from typing import Any, List, Dict
+import os
+import uuid
+from typing import Any, List, Dict, Optional
 from aidars.adapters.base import ApplicationAdapter
 from aidars.distributed.models import WorkloadSpec, ExecutionSpec, OutputVerificationPolicy
+
 
 class MLTrainingAdapter(ApplicationAdapter):
     """ML Training adapter implementing the generic contract.
@@ -20,16 +23,14 @@ class MLTrainingAdapter(ApplicationAdapter):
 
     def validate(self, request: dict) -> bool:
         """Validate ML training request."""
-        if "script_path" not in request:
-            return False
-        if "dataset_path" not in request:
+        if "script_path" not in request and "script" not in request and "dataset" not in request and "dataset_path" not in request:
             return False
         return True
 
     def evaluate_request(self, request: dict) -> List[WorkloadSpec]:
         """Parse ML training request, calculate requirements, and output WorkloadSpec."""
-        script_path = request.get("script_path")
-        dataset_path = request.get("dataset_path")
+        script_path = request.get("script_path") or request.get("script")
+        dataset_path = request.get("dataset_path") or request.get("dataset")
         epochs = request.get("epochs", 1)
         batch_size = request.get("batch_size", 32)
         requires_gpu = request.get("requires_gpu", False)
@@ -38,10 +39,6 @@ class MLTrainingAdapter(ApplicationAdapter):
         input_asset_hashes = set()
         script_hash = None
         dataset_hash = None
-        
-        import os
-        import hashlib
-        import uuid
         
         for path_var, name in [(script_path, "script"), (dataset_path, "dataset")]:
             if path_var and os.path.exists(path_var) and os.path.isfile(path_var):
@@ -76,34 +73,38 @@ class MLTrainingAdapter(ApplicationAdapter):
             min_vram_bytes=min_vram_bytes,
             estimated_duration_seconds=float(epochs) * 30.0,
             parameters={
+                "script": script_path or "train.py",
+                "dataset": dataset_path or "dataset",
                 "script_hash": script_hash,
                 "dataset_hash": dataset_hash,
                 "epochs": epochs,
                 "batch_size": batch_size
             }
         )
+        spec.execution_spec = self.build_execution_spec(spec)
         return [spec]
         
     def build_execution_spec(self, workload: WorkloadSpec) -> ExecutionSpec:
         script_hash = workload.parameters.get("script_hash")
         dataset_hash = workload.parameters.get("dataset_hash")
+        script = workload.parameters.get("script") or "train.py"
+        dataset = workload.parameters.get("dataset") or "dataset"
         epochs = workload.parameters.get("epochs", 1)
         batch_size = workload.parameters.get("batch_size", 32)
         
-        if not script_hash or not dataset_hash:
-            raise ValueError("ML workload missing script or dataset hash")
+        script_arg = f"inputs/{script_hash}" if script_hash else str(script)
+        dataset_arg = f"inputs/{dataset_hash}" if dataset_hash else str(dataset)
             
+        output_path = workload.parameters.get("output", "./outputs/model.pt")
         args = [
-            f"inputs/{script_hash}",
-            "--dataset", f"inputs/{dataset_hash}",
+            script_arg,
+            "--dataset", dataset_arg,
             "--epochs", str(epochs),
             "--batch-size", str(batch_size),
-            "--output", "./outputs/checkpoint.pt"
+            "--output", output_path,
         ]
-        
-        import sys
         return ExecutionSpec(
-            executable=sys.executable, # Use the current python interpreter
+            executable="python",
             args=args,
             env={},
             cwd=None,
@@ -112,5 +113,5 @@ class MLTrainingAdapter(ApplicationAdapter):
 
     def describe_expected_outputs(self, workload: WorkloadSpec) -> OutputVerificationPolicy:
         return OutputVerificationPolicy(
-            expected_output_count=1 # Expect model checkpoint output
+            expected_output_count=1
         )

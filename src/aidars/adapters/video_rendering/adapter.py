@@ -59,22 +59,24 @@ class FFmpegAdapter(ApplicationAdapter):
             min_vram_bytes=min_vram_bytes,
             estimated_duration_seconds=30.0,
             parameters={
+                "input_video_path": input_video_path or "input.mp4",
                 "video_hash": video_hash,
                 "output_format": output_format
             }
         )
+        spec.execution_spec = self.build_execution_spec(spec)
         return [spec]
         
     def build_execution_spec(self, workload: WorkloadSpec) -> ExecutionSpec:
         video_hash = workload.parameters.get("video_hash")
+        input_video = workload.parameters.get("input_video_path") or "input.mp4"
         output_format = workload.parameters.get("output_format", "mp4")
         
-        if not video_hash:
-            raise ValueError("FFmpeg workload missing video_hash")
+        video_arg = f"inputs/{video_hash}" if video_hash else str(input_video)
             
         args = [
             "-y", # Overwrite outputs
-            "-i", f"inputs/{video_hash}",
+            "-i", video_arg,
             "-c:v", "libx264", # Force a common encoder for test stability
             "-preset", "ultrafast", # Faster tests
             "-t", "1", # Process max 1 second to keep tests fast

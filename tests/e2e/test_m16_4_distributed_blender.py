@@ -163,7 +163,7 @@ bpy.ops.wm.save_as_mainfile(filepath="{blend_posix}")
         specs = adapter.evaluate_request(request_dict)
         assert len(specs) == 1
         spec = specs[0]
-        spec.min_ram_bytes = 1024 * 1024 * 1024  # Override 8GB default to allow test to run locally
+        spec.min_ram_bytes = 100 * 1024 * 1024  # Override 8GB default to allow test to run locally even under high CI memory pressure
         spec.min_cpu_cores = 1
 
         # Fix Blender's output path interpretation on Windows by using //../ (relative to .blend file)

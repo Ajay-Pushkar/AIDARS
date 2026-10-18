@@ -64,7 +64,7 @@ class WorkerResourceMonitor:
                 gpu_vendor = "NVIDIA"
                 try:
                     major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
-                    gpu_compute_capability = float(f"{major}.{minor}")
+                    gpu_compute_capability = f"{major}.{minor}"
                 except Exception:
                     # NVML/driver versions differ; unknown remains unknown.
                     pass

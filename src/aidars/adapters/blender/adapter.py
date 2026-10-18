@@ -33,23 +33,27 @@ class BlenderAdapter(ApplicationAdapter):
         input_path = request.get("input_path")
         frame_start = request.get("frame_start", 1)
         frame_end = request.get("frame_end", 250)
-        worker_count_param = request.get("worker_count", "auto")
+        worker_count_param = request.get("worker_count")
         chunk_count_param = request.get("chunk_count")
         requires_gpu = request.get("requires_gpu", False)
         min_cpu_cores = request.get("min_cpu_cores", 1)
         estimated_frame_duration = float(request.get("estimated_frame_duration_seconds", 2.0))
 
-        if worker_count_param == "auto" or worker_count_param is None:
+        if worker_count_param is None:
+            effective_workers = 2
+            adaptive = False
+        elif worker_count_param == "auto":
             effective_workers = 1
+            adaptive = True
         else:
             effective_workers = max(1, int(worker_count_param))
+            adaptive = False
 
         if chunk_count_param is not None:
             chunk_count = int(chunk_count_param)
             adaptive = False
         else:
             chunk_count = None
-            adaptive = True
 
         engine = SceneEngine()
         source = engine.load_source(input_path)
@@ -163,6 +167,11 @@ class BlenderAdapter(ApplicationAdapter):
                 estimated_duration_seconds=float(chunk.frame_count) * estimated_frame_duration,
                 parameters=params,
             )
+            if input_file_hash:
+                try:
+                    spec.execution_spec = self.build_execution_spec(spec)
+                except ValueError:
+                    pass
             specs.append(spec)
 
         return specs

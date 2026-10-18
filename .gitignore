@@ -25,6 +25,7 @@ htmlcov/
 
 # AIDAR Local Runtime Artifacts & Caches
 output/
+outputs/
 .aidars_cache/
 .aidars_cas/
 *.tmp

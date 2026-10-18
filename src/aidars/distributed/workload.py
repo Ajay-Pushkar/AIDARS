@@ -2,6 +2,7 @@
 
 Ties together models, placement, and registry to drive a workload from SUBMITTED to COMPLETED.
 """
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -9,7 +10,7 @@ import time
 import uuid
 import httpx
 from urllib.parse import urlsplit, urlunsplit, quote
-from typing import List, Optional, Set
+from typing import Dict, List, Literal, Optional, Set, Tuple, Union
 
 from aidars.distributed.artifact import ArtifactRegistry
 from aidars.distributed.attempt import AttemptRegistry, AttemptStatus
@@ -93,6 +94,18 @@ class WorkloadOrchestrator:
         # A coordinated group drain must fan out abort/checkpoint requests
         # before its in-flight dispatch is allowed to retry on a new group.
         self._group_drain_events: dict[str, asyncio.Event] = {}
+        self._shared_http_client: Optional[httpx.AsyncClient] = None
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        """Return test-injected http_client or lazily initialize a shared connection pool."""
+        injected = getattr(self, "http_client", None)
+        if injected is not None:
+            return injected
+        if self._shared_http_client is None or self._shared_http_client.is_closed:
+            self._shared_http_client = httpx.AsyncClient(
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            )
+        return self._shared_http_client
 
     async def submit_workload(self, spec: WorkloadSpec) -> str:
         """Submit a new workload for execution. Returns the workload_id."""
@@ -216,11 +229,17 @@ class WorkloadOrchestrator:
             dependency = self.workload_registry.get_workload(dependency_id)
             if dependency is None:
                 return "waiting"
-            if dependency.state in (WorkloadState.FAILED, WorkloadState.UNSCHEDULABLE,
-                                    WorkloadState.TIMEOUT):
+            if dependency.state in (
+                WorkloadState.FAILED,
+                WorkloadState.UNSCHEDULABLE,
+                WorkloadState.TIMEOUT,
+                WorkloadState.CANCELLED,
+                WorkloadState.CANCELLATION_REQUESTED,
+            ):
                 self.workload_registry.update_state(
-                    record.spec.workload_id, WorkloadState.FAILED,
-                    error_message=f"Dependency {dependency_id} did not complete successfully",
+                    record.spec.workload_id,
+                    WorkloadState.FAILED,
+                    error_message=f"Dependency {dependency_id} did not complete successfully (state={dependency.state.value})",
                 )
                 return "failed"
             if dependency.state != WorkloadState.COMPLETED:
@@ -305,6 +324,9 @@ class WorkloadOrchestrator:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if self._shared_http_client is not None and not self._shared_http_client.is_closed:
+            await self._shared_http_client.aclose()
+            self._shared_http_client = None
 
     async def submit_job(
         self,
@@ -476,12 +498,9 @@ class WorkloadOrchestrator:
             if self.attempt_registry is not None:
                 active_count = len(self.attempt_registry.list_running_attempts_for_worker(info.worker_id))
             else:
-                # Compatibility for standalone orchestrators created without
-                # the M10 attempt ledger: derive active work from the existing
-                # workload registry rather than inventing a zero count.
                 active_count = sum(
                     1 for record in self.workload_registry.list_workloads()
-                    if record.state == WorkloadState.PLACED
+                    if record.state in (WorkloadState.PLACED, WorkloadState.EXECUTING)
                     and record.placement_decision is not None
                     and record.placement_decision.selected_worker_id == info.worker_id
                 )
@@ -898,7 +917,7 @@ class WorkloadOrchestrator:
                 self.workload_registry.update_state(workload_id, WorkloadState.EXECUTING)
 
                 # Use http client (which defaults to httpx.AsyncClient or mock)
-                client = getattr(self, "http_client", None) or httpx.AsyncClient()
+                client = self._get_http_client()
                 url = f"{worker_info.endpoint_url}/api/v1/workloads/execute"
 
                 unavailable_group_workers: Set[str] = set()
@@ -1288,7 +1307,7 @@ class WorkloadOrchestrator:
         with self.workload_registry._lock:
             active_workloads = [
                 wid for wid, record in self.workload_registry._workloads.items()
-                if record.state == WorkloadState.PLACED
+                if record.state in (WorkloadState.PLACED, WorkloadState.EXECUTING)
                 and record.placement_decision is not None
                 and record.placement_decision.selected_worker_id == worker_id
                 and wid not in group_workload_ids
@@ -1301,7 +1320,7 @@ class WorkloadOrchestrator:
             "Draining worker %s. Triggering checkpoint for %d workloads and %d execution groups.",
             worker_id, len(active_workloads), len(group_attempts),
         )
-        client = getattr(self, "http_client", None) or httpx.AsyncClient()
+        client = self._get_http_client()
 
         async def checkpoint_member(member_id: str, workload_id: str) -> None:
             member = self.registry.get_worker(member_id)
@@ -1356,7 +1375,7 @@ class WorkloadOrchestrator:
         if attempt is not None and attempt.status in (AttemptStatus.ASSIGNED, AttemptStatus.RUNNING) and attempt.worker_id:
             worker = self.registry.get_worker(attempt.worker_id)
             if worker:
-                client = getattr(self, "http_client", None) or httpx.AsyncClient()
+                client = self._get_http_client()
                 try:
                     encoded_attempt_id = quote(attempt.attempt_id, safe="")
                     await client.post(

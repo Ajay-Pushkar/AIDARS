@@ -65,8 +65,13 @@ class DistributedIntelligence:
                 return
             observation.data_quality = DataQualityState.INVALID
             observation.validation_errors.append("CONFLICTING_REPLAYED_ATTEMPT_IDENTITY")
+            for idx, item in enumerate(self.observations):
+                if item.attempt_id == observation.attempt_id:
+                    self.observations[idx] = observation
+                    break
+        else:
+            self.observations.append(observation)
         self._by_attempt[observation.attempt_id] = observation
-        self.observations.append(observation)
         self._replay_one(observation, workload)
         self._anomalies = self._find_anomalies(sorted(self.observations, key=lambda o: (o.finished_at_utc or 0, o.attempt_id or "")))
 

@@ -191,3 +191,42 @@ def test_purge_deleted_artifacts_sqlite_failure_leaves_memory_intact(temp_db):
 
     assert count == 1
     assert artifact_registry.get_artifact(art_id) is None
+
+
+@pytest.mark.asyncio
+async def test_active_gc_protects_terminal_jobs_within_retention_window(temp_db):
+    """Artifacts from terminal jobs are protected when artifact_retention_seconds > 0."""
+    store = CoordinatorStateStore(temp_db, enforce_single_writer=False)
+    workload_registry = WorkloadRegistry(state_store=store)
+    job_registry = JobRegistry(workload_registry, state_store=store)
+    artifact_registry = ArtifactRegistry(state_store=store)
+
+    coordinator = CoordinatorService(
+        artifact_gc_interval_seconds=0.01,
+        artifact_retention_seconds=3600.0,
+        state_store=store,
+    )
+    coordinator.workload_registry = workload_registry
+    coordinator.job_registry = job_registry
+    coordinator.artifact_registry = artifact_registry
+
+    workload_registry.add_workload(WorkloadSpec(workload_id="w-1", job_id="job-1", task_type="test"))
+    job_registry.create_job("job-1", {"w-1"}, CompletionPolicy.ALL_REQUIRED)
+    workload_registry.update_state("w-1", WorkloadState.COMPLETED)
+
+    artifact_registry.record_artifacts(
+        producer_workload_id="w-1",
+        producer_job_id="job-1",
+        content_hashes={"hash-1"},
+    )
+    art_id = "w-1:hash-1"
+
+    await coordinator.start()
+    try:
+        await asyncio.sleep(0.05)
+        art = artifact_registry.get_artifact(art_id)
+        assert art is not None
+        assert art.lifecycle_state == ArtifactLifecycleState.AVAILABLE, "Must remain AVAILABLE within retention window"
+    finally:
+        await coordinator.stop()
+

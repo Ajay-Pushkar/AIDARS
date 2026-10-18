@@ -395,17 +395,37 @@ class DistributedWorker:
             coordinator_url=coord_url,
         )
 
-        # 3. Stream missing assets concurrently
+        # 3. Stream missing assets concurrently with per-asset singleflight deduplication
         download_targets: Dict[str, List[CandidateSource]] = {
             h: cands for h, cands in locate_resp.locations.items() if cands
         }
 
         if download_targets:
-            transferred_map = await self.client.download_missing_assets(
-                download_targets,
-                cas_adapter=self.cas,
-            )
-            for h, res in transferred_map.items():
+            async def _download_single_hash(h: str, cands: List[CandidateSource]) -> Optional[TransferResult]:
+                async def _do_download() -> Optional[TransferResult]:
+                    # Check local CAS first (in case a concurrent chunk just finished it)
+                    if getattr(self.cas, "has_asset", lambda x: False)(h):
+                        size = getattr(self.cas, "get_asset_size", lambda x: 0)(h) or 0
+                        path = getattr(self.cas, "get_asset_path", lambda x: None)(h)
+                        return TransferResult(
+                            sha256=h, success=True, bytes_transferred=0, total_bytes=size,
+                            verified_sha256=h, committed_path=str(path) if path else None,
+                            source_worker_id="local_cas", source_endpoint_url="local://cas",
+                            duration_seconds=0.0,
+                        )
+                    res_map = await self.client.download_missing_assets({h: cands}, cas_adapter=self.cas)
+                    return res_map.get(h)
+
+                res = await self.single_flight.run(key=f"asset-{h}", operation=_do_download)
+                return res
+
+            tasks = [_download_single_hash(h, cands) for h, cands in download_targets.items()]
+            transferred_list = await asyncio.gather(*tasks)
+
+            for res in transferred_list:
+                if res is None:
+                    continue
+                h = res.sha256
                 results[h] = res
                 if res.success:
                     self.metrics_tracker.record_network_transfer(
@@ -423,7 +443,7 @@ class DistributedWorker:
                         size_bytes=res.total_bytes,
                         source_worker_id=res.source_worker_id,
                     )
-
+                    
         # 4. Handle unresolvable hashes
         for unres_h in locate_resp.unresolved_hashes:
             if unres_h not in results:
@@ -444,11 +464,23 @@ class DistributedWorker:
             result=record.result,
         )
 
+    def _prune_stale_executions(self, max_age_seconds: float = 3600.0) -> None:
+        """Evict terminal execution records older than max_age_seconds."""
+        now = time.time()
+        expired = [
+            aid for aid, rec in self._executions.items()
+            if rec.state in (ExecutionState.SUCCEEDED, ExecutionState.FAILED, ExecutionState.CANCELLED)
+            and (now - rec.updated_at) > max_age_seconds
+        ]
+        for aid in expired:
+            self._executions.pop(aid, None)
+
     async def submit_execution(
         self, attempt_id: str, spec: WorkloadSpec,
         execution_context: Optional[RuntimeExecutionContext] = None,
     ) -> ExecutionStatus:
         """Idempotently accept an execution and run it in the background."""
+        self._prune_stale_executions()
         existing = self._executions.get(attempt_id)
         if existing is not None:
             return self._execution_status(existing)
@@ -546,18 +578,15 @@ class DistributedWorker:
         """Synchronize required assets and execute the workload in a sandbox."""
         logger.info("Worker %s executing workload %s", self.worker_id, spec.workload_id)
         
-        # 1. Sync dependencies with SingleFlight deduplication per asset
+        # 1. Sync dependencies with SingleFlight deduplication
         transfer_start = time.time()
         if spec.input_asset_hashes:
-            # For simplicity, we just sync the whole set at once, but we could wrap 
-            # each hash in single_flight.run. The DistributedClient manages concurrency.
-            # Using singleflight at a higher level to prevent concurrent syncs of the same workload spec.
             def _sync():
                 return self.sync_assets(spec.input_asset_hashes)
-            
+
             sync_results = await self.single_flight.run(
                 key=f"sync-{spec.workload_id}",
-                operation=_sync
+                operation=_sync,
             )
             
             transfer_duration = time.time() - transfer_start

@@ -49,6 +49,9 @@ class WriterRuntime(RuntimeAdapter):
     async def checkpoint(self):
         pass
 
+    async def cancel(self):
+        pass
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size_mb", [10, 100, 500])
 async def test_cas_ingestion_baseline(size_mb):

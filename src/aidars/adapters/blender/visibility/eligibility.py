@@ -54,25 +54,57 @@ class EligibilityAnalyzer:
 
     @staticmethod
     def _curve_indicates_visible_in_range(
-        curve: AnimationCurveInfo,
+        curve: Any,
         frame_start: int,
         frame_end: int,
-        static_hidden: bool,
+        static_hidden: bool = False,
+        interpolation: str = "BEZIER",
     ) -> bool:
-        keyframes = sorted(curve.keyframes, key=lambda kf: kf.frame)
-        if not keyframes:
+        if isinstance(curve, list):
+            raw_kfs = curve
+            interp = interpolation
+        elif hasattr(curve, "keyframes"):
+            raw_kfs = [(kf.frame, kf.value) for kf in curve.keyframes]
+            interp = getattr(curve, "interpolation", "") or interpolation
+        else:
             return not static_hidden
 
-        in_range_values: List[float] = [kf.value for kf in keyframes if frame_start <= kf.frame <= frame_end]
-        if in_range_values:
-            # If ever below threshold in range, object was visible at least partially
-            return any(value < _HIDDEN_THRESHOLD for value in in_range_values)
+        if not raw_kfs:
+            return not static_hidden
 
-        # No keyframe in range: held value from previous keyframe
-        held_value = keyframes[0].value
-        for kf in keyframes:
-            if kf.frame <= frame_start:
-                held_value = kf.value
-            else:
-                break
-        return held_value < _HIDDEN_THRESHOLD
+        sorted_kfs = sorted(raw_kfs, key=lambda kv: kv[0])
+
+        # 1. Any keyframe inside [frame_start, frame_end] indicating visible -> KEEP
+        in_range = [val for frame, val in sorted_kfs if frame_start <= frame <= frame_end]
+        if any(val <= _HIDDEN_THRESHOLD for val in in_range):
+            return True
+
+        # 2. Check bounding keyframes straddling the interval
+        prev_kfs = [val for frame, val in sorted_kfs if frame <= frame_start]
+        next_kfs = [val for frame, val in sorted_kfs if frame >= frame_end]
+
+        prev_val = prev_kfs[-1] if prev_kfs else sorted_kfs[0][1]
+        next_val = next_kfs[0] if next_kfs else sorted_kfs[-1][1]
+
+        if prev_val <= _HIDDEN_THRESHOLD:
+            return True
+        if interp.upper() != "CONSTANT" and next_val <= _HIDDEN_THRESHOLD:
+            return True
+
+        return not in_range and prev_val <= _HIDDEN_THRESHOLD
+
+
+def _curve_indicates_visible_in_range(
+    keyframes: Any,
+    frame_start: int,
+    frame_end: int,
+    interpolation: str = "BEZIER",
+) -> bool:
+    """Module-level conservative F-curve visibility check over [frame_start, frame_end]."""
+    return EligibilityAnalyzer._curve_indicates_visible_in_range(
+        keyframes,
+        frame_start,
+        frame_end,
+        static_hidden=False,
+        interpolation=interpolation,
+    )

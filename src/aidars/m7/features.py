@@ -31,10 +31,14 @@ class FeatureExtractor:
         throughput_norm = 0.0
         
         if temporal_state:
+            if getattr(temporal_state, "cpu_utilization_ema", None) and temporal_state.cpu_utilization_ema.initialized:
+                cpu_ratio = max(0.0, min(1.0, 1.0 - float(temporal_state.cpu_utilization_ema.value)))
+            if getattr(temporal_state, "ram_utilization_ema", None) and temporal_state.ram_utilization_ema.initialized:
+                ram_ratio = max(0.0, min(1.0, 1.0 - float(temporal_state.ram_utilization_ema.value)))
             # We assume failure_rate is a probability EMA [0.0, 1.0]
             fail_rate = min(1.0, max(0.0, temporal_state.failure_rate_ema.value))
             # Latency normalized (assuming max expected latency is 1000ms)
-            latency_norm = min(1.0, temporal_state.latency_ema.value / 1000.0)
+            latency_norm = min(1.0, max(0.0, temporal_state.latency_ema.value / 1000.0))
             
         required = set(spec.input_asset_hashes)
         cached = set(profile.local_cached_hashes)
