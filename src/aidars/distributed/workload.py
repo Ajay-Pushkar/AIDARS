@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
 import time
 import uuid
 import httpx
@@ -95,6 +97,7 @@ class WorkloadOrchestrator:
         # before its in-flight dispatch is allowed to retry on a new group.
         self._group_drain_events: dict[str, asyncio.Event] = {}
         self._shared_http_client: Optional[httpx.AsyncClient] = None
+        self.worker_bootstrap_secret: Optional[str] = None
 
     def _get_http_client(self) -> httpx.AsyncClient:
         """Return test-injected http_client or lazily initialize a shared connection pool."""
@@ -106,6 +109,46 @@ class WorkloadOrchestrator:
                 limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
             )
         return self._shared_http_client
+
+    def _worker_control_headers(self) -> Dict[str, str]:
+        """Return Authorization Bearer header for Coordinator -> Worker control-plane requests."""
+        secret = (
+            self.worker_bootstrap_secret
+            or os.environ.get("AIDAR_WORKER_BOOTSTRAP_SECRET", "").strip()
+        )
+        if secret:
+            return {"Authorization": f"Bearer {secret}"}
+        return {}
+
+    def _maybe_promote_spare_worker(
+        self,
+        parent_job: Any,
+        job_selected_ids: Set[str],
+        exhausted_worker_ids: Set[str],
+        all_workers: List[Any],
+        required_worker_count: int = 1,
+    ) -> bool:
+        """Promote an eligible spare worker to selected_worker_ids when active workers are exhausted."""
+        if not parent_job or not getattr(parent_job, "spare_worker_ids", None):
+            return False
+        unexhausted_selected = [wid for wid in job_selected_ids if wid not in exhausted_worker_ids]
+        if len(unexhausted_selected) >= required_worker_count:
+            return False
+        available_spares = [wid for wid in parent_job.spare_worker_ids if wid not in exhausted_worker_ids]
+        if not available_spares:
+            return False
+        promoted = available_spares.pop(0)
+        parent_job.spare_worker_ids = available_spares
+        if parent_job.selected_worker_ids is not None and promoted not in parent_job.selected_worker_ids:
+            parent_job.selected_worker_ids.append(promoted)
+        job_selected_ids.add(promoted)
+        if hasattr(self.job_registry, "_persist_job"):
+            self.job_registry._persist_job(parent_job)
+        logger.info(
+            "Promoted spare worker %s to selected_worker_ids for job %s",
+            promoted, parent_job.job_id,
+        )
+        return True
 
     async def submit_workload(self, spec: WorkloadSpec) -> str:
         """Submit a new workload for execution. Returns the workload_id."""
@@ -535,9 +578,11 @@ class WorkloadOrchestrator:
         cancel_url = f"{status_url}/cancel"
         control_timeout = 10.0
 
+        ctrl_headers = self._worker_control_headers()
+
         async def cancel_remote() -> None:
             try:
-                await client.post(cancel_url, timeout=control_timeout)
+                await client.post(cancel_url, headers=ctrl_headers, timeout=control_timeout)
             except Exception as exc:
                 logger.warning("Best-effort cancel of %s on %s failed: %s", attempt_id, worker.worker_id, exc)
 
@@ -552,10 +597,14 @@ class WorkloadOrchestrator:
         # querying the same attempt_id rather than submitting a second time.
         try:
             response = await client.post(
-                submit_url, json=request.model_dump(mode="json"), timeout=control_timeout,
+                submit_url, json=request.model_dump(mode="json"), headers=ctrl_headers, timeout=control_timeout,
             )
             if response.status_code == 404:
                 raise WorkerExecutionSubmitUnavailable("worker does not expose the M20 execution endpoint")
+            if response.status_code in (401, 403):
+                raise WorkerExecutionSubmitUnavailable(
+                    f"worker rejected control-plane authentication (HTTP {response.status_code})"
+                )
             response.raise_for_status()
             payload = response.json()
             try:
@@ -568,13 +617,17 @@ class WorkloadOrchestrator:
                 return WorkloadExecutionResult(**payload)
         except (httpx.RequestError, httpx.HTTPStatusError) as exc:
             try:
-                resolution = await client.get(status_url, timeout=control_timeout)
+                resolution = await client.get(status_url, headers=ctrl_headers, timeout=control_timeout)
             except httpx.RequestError as resolution_exc:
                 raise WorkerExecutionSubmitUnavailable(
                     f"worker execution submit could not be resolved: {resolution_exc}"
                 ) from resolution_exc
             if resolution.status_code == 404:
                 raise WorkerExecutionSubmitUnavailable("worker has no record of the submitted attempt")
+            if resolution.status_code in (401, 403):
+                raise WorkerExecutionSubmitUnavailable(
+                    f"worker rejected control-plane authentication (HTTP {resolution.status_code})"
+                )
             resolution.raise_for_status()
             status = ExecutionStatus(**resolution.json())
 
@@ -607,7 +660,7 @@ class WorkloadOrchestrator:
                     )
 
             try:
-                response = await client.get(status_url, timeout=control_timeout)
+                response = await client.get(status_url, headers=ctrl_headers, timeout=control_timeout)
                 if response.status_code == 404:
                     raise WorkerExecutionRecordLost("worker execution record disappeared")
                 response.raise_for_status()
@@ -643,7 +696,7 @@ class WorkloadOrchestrator:
 
     async def _ack_execution(self, client, status_url: str, timeout: float) -> None:
         try:
-            response = await client.delete(status_url, timeout=timeout)
+            response = await client.delete(status_url, headers=self._worker_control_headers(), timeout=timeout)
             if response.status_code not in (200, 204, 404):
                 response.raise_for_status()
         except Exception as exc:
@@ -738,6 +791,9 @@ class WorkloadOrchestrator:
 
         parent_job = self.job_registry.get_job(spec.job_id) if (spec.job_id and self.job_registry is not None) else None
         job_selected_ids = set(parent_job.selected_worker_ids) if (parent_job and parent_job.selected_worker_ids is not None) else None
+        if parent_job is not None and job_selected_ids is not None and exhausted_worker_ids:
+            all_workers = self.registry.list_workers(active_only=False)
+            self._maybe_promote_spare_worker(parent_job, job_selected_ids, exhausted_worker_ids, all_workers, required_worker_count)
         if job_selected_ids is not None and len(job_selected_ids) > 0 and all(wid in exhausted_worker_ids for wid in job_selected_ids):
             self.workload_registry.update_state(
                 workload_id, WorkloadState.FAILED,
@@ -753,6 +809,8 @@ class WorkloadOrchestrator:
 
             async with self._placement_lock:
                 all_workers = self.registry.list_workers(active_only=False)
+                if parent_job is not None and job_selected_ids is not None and exhausted_worker_ids:
+                    self._maybe_promote_spare_worker(parent_job, job_selected_ids, exhausted_worker_ids, all_workers, required_worker_count)
                 if job_selected_ids is not None:
                     workers = [
                         w for w in all_workers
@@ -933,7 +991,7 @@ class WorkloadOrchestrator:
                         # Legacy callers without AttemptRegistry retain the
                         # old synchronous endpoint for compatibility. M20's
                         # normal coordinator path always has attempt_id.
-                        resp = await client.post(url, json=spec.model_dump(mode='json'), timeout=10.0)
+                        resp = await client.post(url, json=spec.model_dump(mode='json'), headers=self._worker_control_headers(), timeout=10.0)
                         resp.raise_for_status()
                         result = WorkloadExecutionResult(**resp.json())
                     else:
@@ -1329,6 +1387,7 @@ class WorkloadOrchestrator:
             try:
                 await client.post(
                     f"{member.endpoint_url}/api/v1/workloads/{workload_id}/checkpoint",
+                    headers=self._worker_control_headers(),
                     timeout=10.0,
                 )
             except Exception as exc:
@@ -1380,6 +1439,7 @@ class WorkloadOrchestrator:
                     encoded_attempt_id = quote(attempt.attempt_id, safe="")
                     await client.post(
                         f"{worker.endpoint_url}/api/v1/executions/{encoded_attempt_id}/cancel",
+                        headers=self._worker_control_headers(),
                         timeout=10.0,
                     )
                 except Exception as exc:

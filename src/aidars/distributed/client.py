@@ -196,7 +196,7 @@ class DistributedClient:
         resp = await self.http_client.post(
             url,
             json=req_payload.model_dump(mode="json"),
-            headers=self._auth_headers(self._worker_credential),
+            headers=self._auth_headers(self._worker_credential or self._bootstrap_secret),
             timeout=self.default_timeout_seconds,
         )
         resp.raise_for_status()

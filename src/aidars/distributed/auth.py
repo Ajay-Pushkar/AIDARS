@@ -278,7 +278,11 @@ def make_require_admin_or_any_worker(store: CredentialStore):
         if store.insecure_mode:
             return
         token = extract_bearer_token(authorization)
-        if store.verify_admin_token(token) or store.verify_any_worker_credential(token):
+        if (
+            store.verify_admin_token(token)
+            or store.verify_any_worker_credential(token)
+            or store.verify_bootstrap_secret(token)
+        ):
             return
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing credential")
     return require_admin_or_any_worker

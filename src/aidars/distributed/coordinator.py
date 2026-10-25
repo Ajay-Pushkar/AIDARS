@@ -197,6 +197,8 @@ class CoordinatorService:
             artifact_registry=self.artifact_registry,
             attempt_registry=self.attempt_registry,
         )
+        if getattr(self.credential_store, "_bootstrap_secret", None):
+            self.orchestrator.worker_bootstrap_secret = self.credential_store._bootstrap_secret
 
         self._start_time_utc = time.time()
         self._running: bool = False

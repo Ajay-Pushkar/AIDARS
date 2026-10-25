@@ -66,6 +66,7 @@ class WorkerServer:
         self.cas = cas_adapter
         self.cas_adapter = cas_adapter
         self.distributed_worker = distributed_worker
+        self.worker = distributed_worker
         self.worker_id = worker_id or f"worker-{int(time.time())}"
         self.host = host
         self.port = port
@@ -79,7 +80,11 @@ class WorkerServer:
         async def verify_control_plane_auth(request: Request) -> None:
             """Enforce bearer token authentication on worker execution endpoints when secure mode is active."""
             insecure = os.environ.get("AIDAR_INSECURE_MODE", "1").strip().lower() in ("1", "true", "yes")
-            expected_secret = os.environ.get("AIDAR_WORKER_BOOTSTRAP_SECRET", "").strip()
+            worker_obj = getattr(self, "worker", None) or getattr(self, "distributed_worker", None)
+            expected_secret = (
+                (getattr(worker_obj, "bootstrap_secret", None) or "")
+                or os.environ.get("AIDAR_WORKER_BOOTSTRAP_SECRET", "")
+            ).strip()
             if insecure or not expected_secret:
                 return
             auth_header = request.headers.get("authorization", "")

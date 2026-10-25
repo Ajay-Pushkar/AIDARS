@@ -408,3 +408,125 @@ async def test_artifact_verification_failure_still_works():
     assert wl.state == WorkloadState.FAILED
     attempts = attempt_registry.list_attempts_for_workload("task-verif")
     assert attempts[0].failure_category == FailureCategory.ARTIFACT_VERIFICATION_FAILURE
+
+
+async def test_orchestrator_authenticates_to_worker_in_secure_mode(monkeypatch, tmp_path: Path):
+    """Verify WorkloadOrchestrator sends Authorization Bearer to WorkerServer when AIDAR_INSECURE_MODE=0."""
+    monkeypatch.setenv("AIDAR_INSECURE_MODE", "0")
+    monkeypatch.setenv("AIDAR_WORKER_BOOTSTRAP_SECRET", "test-worker-secret")
+
+    cas = LocalCASAdapter(cas_dir=tmp_path / "cas")
+    worker = DistributedWorker(worker_id="w-secure", cas_adapter=cas, bootstrap_secret="test-worker-secret")
+    app = worker.server.app
+
+    from httpx import ASGITransport
+
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://worker-secure") as client:
+        registry = WorkerRegistry()
+        workload_registry = WorkloadRegistry()
+        attempt_registry = AttemptRegistry()
+        orchestrator = WorkloadOrchestrator(
+            registry=registry,
+            workload_registry=workload_registry,
+            attempt_registry=attempt_registry,
+            execution_poll_interval_seconds=0.01,
+        )
+        orchestrator.worker_bootstrap_secret = "test-worker-secret"
+        orchestrator.http_client = client
+
+        w_info = WorkerInfo(
+            worker_id="w-secure",
+            endpoint_url="http://worker-secure",
+            ip_address="127.0.0.1",
+            port=8000,
+            status=WorkerStatus.ACTIVE,
+            capacity_bytes=4096,
+            used_bytes=0,
+            resource_profile=_resource_profile("w-secure"),
+        )
+        registry.register_worker(w_info)
+
+        spec = WorkloadSpec(
+            workload_id="task-secure-1",
+            task_type="test",
+            execution_spec=ExecutionSpec(
+                executable=sys.executable,
+                args=["-c", "print('secure execution ok')"],
+            ),
+        )
+        workload_registry.add_workload(spec)
+
+        await orchestrator._process_workload("task-secure-1")
+
+        wl = workload_registry.get_workload("task-secure-1")
+        assert wl.state == WorkloadState.COMPLETED
+        assert wl.execution_result is not None
+        assert wl.execution_result.success is True
+
+
+async def test_spare_worker_promoted_on_retry_after_submit_unavailable():
+    """Verify that when worker-1 fails with submit unavailable, spare worker-2 is promoted on retry."""
+    from aidars.distributed.job_registry import JobRegistry
+    dispatches = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        wid = request.url.host
+        dispatches.append(wid)
+        if wid == "worker-1":
+            # Worker 1 rejects execution
+            return httpx.Response(401, json={"detail": "Unauthorized"})
+        elif wid == "worker-2":
+            if request.method == "POST" and request.url.path == "/api/v1/executions":
+                return httpx.Response(202, json={"attempt_id": "task-failover#2", "workload_id": "task-failover", "state": "accepted"})
+            elif request.method == "GET":
+                return httpx.Response(200, json={
+                    "attempt_id": "task-failover#2", "workload_id": "task-failover", "state": "succeeded",
+                    "result": {"workload_id": "task-failover", "worker_id": "w-2", "success": True, "output_asset_hashes": [], "execution_duration_seconds": 0.1}
+                })
+            elif request.method == "DELETE":
+                return httpx.Response(204)
+        return httpx.Response(404)
+
+    registry = WorkerRegistry()
+    workload_registry = WorkloadRegistry()
+    attempt_registry = AttemptRegistry()
+    job_registry = JobRegistry(workload_registry)
+    orchestrator = WorkloadOrchestrator(
+        registry=registry,
+        workload_registry=workload_registry,
+        attempt_registry=attempt_registry,
+        job_registry=job_registry,
+        execution_poll_interval_seconds=0.01,
+        max_attempts=3,
+    )
+    orchestrator.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    w1 = WorkerInfo(
+        worker_id="w-1", endpoint_url="http://worker-1", ip_address="127.0.0.1", port=8001,
+        status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("w-1"),
+    )
+    w2 = WorkerInfo(
+        worker_id="w-2", endpoint_url="http://worker-2", ip_address="127.0.0.1", port=8002,
+        status=WorkerStatus.ACTIVE, capacity_bytes=4096, used_bytes=0,
+        resource_profile=_resource_profile("w-2"),
+    )
+    registry.register_worker(w1)
+    registry.register_worker(w2)
+
+    spec = WorkloadSpec(workload_id="task-failover", job_id="job-failover", task_type="test")
+    job_registry.create_job(
+        "job-failover",
+        {"task-failover"},
+        selected_worker_ids=["w-1"],
+        spare_worker_ids=["w-2"],
+    )
+    workload_registry.add_workload(spec)
+
+    await orchestrator._process_workload("task-failover")
+
+    wl = workload_registry.get_workload("task-failover")
+    assert wl.state == WorkloadState.COMPLETED
+    assert "worker-1" in dispatches
+    assert "worker-2" in dispatches

@@ -91,6 +91,7 @@ class DistributedWorker:
         # point): it registers, serves, and receives assets like any other
         # node, but PlacementEngine must never select it for compute.
         self.can_execute_workloads = can_execute_workloads
+        self.bootstrap_secret = bootstrap_secret
         self._last_reported_inventory: Set[str] = set()
 
         # 1. CAS Adapter Initialization
@@ -504,6 +505,24 @@ class DistributedWorker:
                 record.state = ExecutionState.CANCELLED
                 record.updated_at = time.time()
                 return
+
+            if spec.input_asset_hashes:
+                missing = [h for h in spec.input_asset_hashes if not self.cas.has_asset(h)]
+                if missing:
+                    synced = await self.sync_assets(list(spec.input_asset_hashes))
+                    failed_hashes = [h for h in missing if h not in synced or not synced[h].success]
+                    if failed_hashes:
+                        record.state = ExecutionState.FAILED
+                        record.result = WorkloadExecutionResult(
+                            workload_id=spec.workload_id,
+                            worker_id=self.worker_id,
+                            success=False,
+                            output_asset_hashes=set(),
+                            execution_duration_seconds=0.0,
+                            error_message=f"Failed to synchronize missing input assets: {failed_hashes}",
+                            failure_category=FailureCategory.ASSET_STAGING_FAILURE,
+                        )
+                        return
 
             result = await self.execute_workload(spec, execution_context=execution_context)
             record.result = result

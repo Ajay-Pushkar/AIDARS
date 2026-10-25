@@ -9,6 +9,7 @@ import json
 import os
 import psutil
 import platform
+import sys
 from typing import Any, Dict, Optional, Tuple
 
 from aidars.distributed.models import RuntimeExecutionContext, WorkloadSpec
@@ -140,8 +141,11 @@ class GenericSubprocessRuntime(RuntimeAdapter):
                     env.update(exec_spec.env)
                 
                 cwd = exec_spec.cwd or workdir
+                executable = exec_spec.executable
+                if executable in ("python", "python3"):
+                    executable = sys.executable
                 self._process = await asyncio.create_subprocess_exec(
-                    exec_spec.executable,
+                    executable,
                     *exec_spec.args,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -153,6 +157,11 @@ class GenericSubprocessRuntime(RuntimeAdapter):
                 command = spec.parameters.get("command")
                 if not command:
                     return False, None, "No execution_spec or command specified in workload parameters"
+
+                if command.startswith("python ") or command.startswith("python3 "):
+                    parts = command.split(" ", 1)
+                    py_exe = f'"{sys.executable}"' if " " in sys.executable else sys.executable
+                    command = f"{py_exe} {parts[1]}"
 
                 self._process = await asyncio.create_subprocess_shell(
                     command,
