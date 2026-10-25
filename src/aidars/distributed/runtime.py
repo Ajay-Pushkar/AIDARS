@@ -5,14 +5,35 @@ Defines the interface for running computational workloads inside isolated sandbo
 
 import abc
 import asyncio
+import glob
 import json
 import os
 import psutil
 import platform
+import shutil
 import sys
 from typing import Any, Dict, Optional, Tuple
 
 from aidars.distributed.models import RuntimeExecutionContext, WorkloadSpec
+
+
+def _resolve_blender_executable(executable: str) -> str:
+    """Resolve 'blender' to AIDAR_BLENDER_EXECUTABLE or standard Windows install path."""
+    env_bin = os.environ.get("AIDAR_BLENDER_EXECUTABLE", "").strip()
+    if env_bin and os.path.exists(env_bin):
+        return env_bin
+    found = shutil.which(executable)
+    if found:
+        return found
+    if os.name == "nt":
+        candidates = sorted(
+            glob.glob(r"C:\Program Files\Blender Foundation\Blender*\blender.exe"),
+            reverse=True,
+        )
+        if candidates:
+            return candidates[0]
+    return executable
+
 
 
 class RuntimeAdapter(abc.ABC):
@@ -142,11 +163,39 @@ class GenericSubprocessRuntime(RuntimeAdapter):
                 
                 cwd = exec_spec.cwd or workdir
                 executable = exec_spec.executable
+                args = list(exec_spec.args)
                 if executable in ("python", "python3"):
                     executable = sys.executable
+
+                if os.path.basename(executable).lower() in ("blender", "blender.exe"):
+                    executable = _resolve_blender_executable(executable)
+                    # Real Blender requires the input scene path on the CLI to end with '.blend'.
+                    # Create a '.blend' alias inside inputs/ for any extensionless CAS scene argument
+                    # while preserving the original ExecutionSpec contract for unit tests.
+                    working_dir = getattr(context, "working_directory", None) or workdir
+                    resolved_args: list[str] = []
+                    for arg in args:
+                        if (
+                            isinstance(arg, str)
+                            and arg.startswith("inputs/")
+                            and not arg.endswith((".blend", ".py"))
+                        ):
+                            abs_src = os.path.join(str(working_dir), arg)
+                            abs_blend = f"{abs_src}.blend"
+                            if os.path.exists(abs_src) and not os.path.exists(abs_blend):
+                                try:
+                                    os.link(abs_src, abs_blend)
+                                except OSError:
+                                    shutil.copy2(abs_src, abs_blend)
+                            if os.path.exists(abs_blend):
+                                resolved_args.append(f"{arg}.blend")
+                                continue
+                        resolved_args.append(arg)
+                    args = resolved_args
+
                 self._process = await asyncio.create_subprocess_exec(
                     executable,
-                    *exec_spec.args,
+                    *args,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
@@ -162,6 +211,11 @@ class GenericSubprocessRuntime(RuntimeAdapter):
                     parts = command.split(" ", 1)
                     py_exe = f'"{sys.executable}"' if " " in sys.executable else sys.executable
                     command = f"{py_exe} {parts[1]}"
+                elif command.startswith("blender ") or command.startswith("blender.exe "):
+                    parts = command.split(" ", 1)
+                    blender_exe = _resolve_blender_executable("blender")
+                    b_exe = f'"{blender_exe}"' if " " in blender_exe else blender_exe
+                    command = f"{b_exe} {parts[1]}"
 
                 self._process = await asyncio.create_subprocess_shell(
                     command,

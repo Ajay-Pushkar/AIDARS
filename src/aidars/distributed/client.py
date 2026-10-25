@@ -414,14 +414,22 @@ class DistributedClient:
             if not output_hashes:
                 return saved_files
 
-            loc_resp = await client.post(
-                f"{clean_coord}/api/v1/assets/locate",
-                json={"requester_worker_id": "client-pull", "missing_hashes": output_hashes},
-                headers=headers,
-                timeout=timeout_seconds,
-            )
-            loc_resp.raise_for_status()
-            locations = loc_resp.json().get("locations", {})
+            locations: Dict[str, Any] = {}
+            for _ in range(10):
+                try:
+                    loc_resp = await client.post(
+                        f"{clean_coord}/api/v1/assets/locate",
+                        json={"requester_worker_id": "client-pull", "missing_hashes": output_hashes},
+                        headers=headers,
+                        timeout=timeout_seconds,
+                    )
+                    loc_resp.raise_for_status()
+                    locations = loc_resp.json().get("locations", {})
+                    if any(locations.get(h) for h in output_hashes):
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(1.0)
 
             for h in output_hashes:
                 candidates = locations.get(h, [])

@@ -1316,6 +1316,8 @@ class WorkloadOrchestrator:
         consumers -- it does not replace or duplicate it. No-op if
         artifact_registry isn't configured or there's nothing to record,
         so callers/tests that never touch M8 see no behavior change."""
+        if self.registry is not None and result.worker_id and result.output_asset_hashes:
+            self.registry.add_worker_hashes(result.worker_id, result.output_asset_hashes)
         if self.artifact_registry is None or not result.output_asset_hashes:
             return
         self.artifact_registry.record_artifacts(
