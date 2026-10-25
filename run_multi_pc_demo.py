@@ -337,8 +337,9 @@ class AIDARValidationHarness:
         active_workers = [w for w in workers if w.get("status") == "active"]
         print_info(f"Registered workers total: {len(workers)} (Active: {len(active_workers)})")
 
-        if len(active_workers) < 2:
-            print_error(f"Topology requires at least 2 active workers for distributed validation. Found: {len(active_workers)}")
+        required_workers = 2 if any(s in (1, 2, 7) for s in getattr(self, "active_stages", [])) else 1
+        if len(active_workers) < required_workers:
+            print_error(f"Topology requires at least {required_workers} active worker(s) for selected stages. Found: {len(active_workers)}")
             for w in workers:
                 print_warning(f"  Worker: {w.get('worker_id')} status={w.get('status')} endpoint={w.get('endpoint_url')}")
             res.result_status = "FAILED"
@@ -1441,6 +1442,7 @@ class AIDARValidationHarness:
         print(f"{Colors.BOLD}{Colors.HEADER}Coordinator: {self.coordinator_url}{Colors.RESET}")
         print(f"{Colors.BOLD}{Colors.HEADER}{'=' * 70}{Colors.RESET}\n")
 
+        self.active_stages = stages
         # Stage 0 is prerequisite
         s0 = await self.stage_0_connectivity()
         self.results.append(s0)
