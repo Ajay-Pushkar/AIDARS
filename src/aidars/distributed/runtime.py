@@ -35,6 +35,38 @@ def _resolve_blender_executable(executable: str) -> str:
     return executable
 
 
+def _resolve_ffmpeg_executable(executable: str) -> str:
+    """Resolve 'ffmpeg' to AIDAR_FFMPEG_EXECUTABLE, PATH, or WinGet install path."""
+    env_bin = os.environ.get("AIDAR_FFMPEG_EXECUTABLE", "").strip()
+    if env_bin and os.path.exists(env_bin):
+        return env_bin
+    found = shutil.which(executable)
+    if found:
+        return found
+    if os.name == "nt":
+        local_appdata = os.environ.get("LOCALAPPDATA", "")
+        search_patterns = [
+            os.path.join(
+                local_appdata,
+                "Microsoft",
+                "WinGet",
+                "Packages",
+                "Gyan.FFmpeg*",
+                "**",
+                "bin",
+                "ffmpeg.exe",
+            ),
+            r"C:\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+        ]
+        for pattern in search_patterns:
+            matches = sorted(glob.glob(pattern, recursive=True), reverse=True)
+            if matches:
+                return matches[0]
+    return executable
+
+
+
 
 class RuntimeAdapter(abc.ABC):
     """Abstract base class for workload execution runtimes.
@@ -193,6 +225,9 @@ class GenericSubprocessRuntime(RuntimeAdapter):
                         resolved_args.append(arg)
                     args = resolved_args
 
+                if os.path.basename(executable).lower() in ("ffmpeg", "ffmpeg.exe"):
+                    executable = _resolve_ffmpeg_executable(executable)
+
                 self._process = await asyncio.create_subprocess_exec(
                     executable,
                     *args,
@@ -216,6 +251,11 @@ class GenericSubprocessRuntime(RuntimeAdapter):
                     blender_exe = _resolve_blender_executable("blender")
                     b_exe = f'"{blender_exe}"' if " " in blender_exe else blender_exe
                     command = f"{b_exe} {parts[1]}"
+                elif command.startswith("ffmpeg ") or command.startswith("ffmpeg.exe "):
+                    parts = command.split(" ", 1)
+                    ffmpeg_exe = _resolve_ffmpeg_executable("ffmpeg")
+                    f_exe = f'"{ffmpeg_exe}"' if " " in ffmpeg_exe else ffmpeg_exe
+                    command = f"{f_exe} {parts[1]}"
 
                 self._process = await asyncio.create_subprocess_shell(
                     command,

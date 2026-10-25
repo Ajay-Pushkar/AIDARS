@@ -352,7 +352,7 @@ async def test_concurrent_dispatches_do_not_exceed_worker_workload_limit():
             ).model_dump(mode="json")
 
     class SlowClient:
-        async def post(self, url, json, timeout):
+        async def post(self, url, json, timeout=None, **kwargs):
             await asyncio.sleep(0.03)
             return Response(json.get("workload_id") or json["spec"]["workload_id"])
 

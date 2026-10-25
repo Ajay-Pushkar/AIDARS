@@ -46,23 +46,29 @@ class FFmpegAdapter(ApplicationAdapter):
         
         # CPU/RAM/GPU/VRAM requirements estimation
         min_vram_bytes = 2 * 1024 * 1024 * 1024 if requires_gpu else 0
-        min_ram_bytes = 4 * 1024 * 1024 * 1024
+        min_ram_bytes = int(request.get("min_ram_bytes", 4 * 1024 * 1024 * 1024))
+        min_cpu_cores = int(request.get("min_cpu_cores", 4))
+
+        params = {
+            "input_video_path": input_video_path or "input.mp4",
+            "video_hash": video_hash,
+            "output_format": output_format,
+        }
+        for k, v in request.items():
+            if k not in params and k not in ("min_ram_bytes", "min_cpu_cores", "requires_gpu"):
+                params[k] = v
         
         spec = WorkloadSpec(
             workload_id=f"{job_id}-chunk-0",
             job_id=job_id,
             task_type="video_transcoding",
             input_asset_hashes=input_asset_hashes,
-            min_cpu_cores=4,
+            min_cpu_cores=min_cpu_cores,
             min_ram_bytes=min_ram_bytes,
             requires_gpu=requires_gpu,
             min_vram_bytes=min_vram_bytes,
-            estimated_duration_seconds=30.0,
-            parameters={
-                "input_video_path": input_video_path or "input.mp4",
-                "video_hash": video_hash,
-                "output_format": output_format
-            }
+            estimated_duration_seconds=float(request.get("estimated_duration_seconds", 30.0)),
+            parameters=params,
         )
         spec.execution_spec = self.build_execution_spec(spec)
         return [spec]
@@ -74,7 +80,11 @@ class FFmpegAdapter(ApplicationAdapter):
         codec = str(spec.parameters.get("codec", "libx264"))
         resolution = str(spec.parameters.get("resolution", "1920x1080"))
         output_format = str(spec.parameters.get("output_format", "mp4"))
-        ffmpeg_exec = str(spec.parameters.get("ffmpeg_executable", "ffmpeg"))
+        ffmpeg_exec = str(
+            spec.parameters.get("ffmpeg_executable")
+            or os.environ.get("AIDAR_FFMPEG_EXECUTABLE")
+            or "ffmpeg"
+        )
 
         start_time = spec.parameters.get("start_time")
         duration = spec.parameters.get("duration")
@@ -96,11 +106,7 @@ class FFmpegAdapter(ApplicationAdapter):
 
         return ExecutionSpec(
             command=ffmpeg_exec,
-            args=args,
-            env={"AIDAR_ADAPTER": "ffmpeg"},
-            expected_output_Loading=[],
-        ) if "expected_output_Loading" in ExecutionSpec.model_fields else ExecutionSpec(
-            command=ffmpeg_exec,
+            executable=ffmpeg_exec,
             args=args,
             env={"AIDAR_ADAPTER": "ffmpeg"},
         )
