@@ -23,14 +23,14 @@ A. ENVIRONMENT
   Python Version:     3.14.5
   Coordinator URL:    http://192.168.29.234:8000
   Blender Executable: C:\Program Files\Blender Foundation\Blender 4.5\blender.EXE
-  FFmpeg Executable:  C:\Users\kurap\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.2-full_build\bin\ffmpeg.exe
+  FFmpeg Executable:  C:\Users\kurap\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.2-full_build\bin\ffmpeg.EXE
   Ollama URL:         http://127.0.0.1:11434 (Model: deepseek-r1:8b)
 
 B. WORKER TOPOLOGY
   Worker 1: pc-a @ http://192.168.29.234:8001 (Status: active)
-    CPUs: 14 | RAM Avail: 3.0 GB | GPU: False
-  Worker 2: pc-b @ http://192.168.29.234:8002 (Status: active)
-    CPUs: 14 | RAM Avail: 3.0 GB | GPU: False
+    CPUs: 14 | RAM Avail: 3.6 GB | GPU: False
+  Worker 2: pc-b @ http://192.168.29.47:8002 (Status: active)
+    CPUs: 4 | RAM Avail: 3.7 GB | GPU: False
 
 C. CONNECTIVITY RESULTS
   Coordinator ping and worker registration queries succeeded with HTTP 200.
