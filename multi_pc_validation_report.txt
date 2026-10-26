@@ -6,7 +6,7 @@ AIDAR REAL VALIDATION FINAL REPORT
 | Workload | Submitted | Placed | Worker | Executed | Completed | Output Verified | Result |
 |---|---|---|---|---|---|---|---|
 | Stage 0: Connectivity | [-] | [-] | N/A | [-] | [x] | [-] | **VERIFIED** |
-| Stage 8: Parallel Split/Merge & Right-Sizing | [x] | [x] | worker-a + worker-b | [x] | [x] | [x] | **VERIFIED** |
+| Stage 8: Parallel Split/Merge & Right-Sizing | [x] | [x] | pc-a + pc-b | [x] | [x] | [x] | **VERIFIED** |
 
 ==================================================
 SECTIONS A THROUGH M:
@@ -21,10 +21,12 @@ A. ENVIRONMENT
   Ollama URL:         http://127.0.0.1:11434 (Model: deepseek-r1:8b)
 
 B. WORKER TOPOLOGY
-  Worker 1: worker-b @ http://192.168.29.234:8002 (Status: active)
-    CPUs: 14 | RAM Avail: 1.8 GB | GPU: False
-  Worker 2: worker-a @ http://192.168.29.234:8001 (Status: active)
-    CPUs: 14 | RAM Avail: 1.8 GB | GPU: False
+  Worker 1: pc-a @ http://192.168.29.234:8001 (Status: active)
+    CPUs: 14 | RAM Avail: 3.8 GB | GPU: False
+  Worker 2: pc-b @ http://192.168.29.47:8002 (Status: active)
+    CPUs: 4 | RAM Avail: 1.3 GB | GPU: False
+  Worker 3: worker-b @ http://192.168.29.234:8002 (Status: active)
+    CPUs: 14 | RAM Avail: 3.9 GB | GPU: False
 
 C. CONNECTIVITY RESULTS
   Coordinator ping and worker registration queries succeeded with HTTP 200.
@@ -52,7 +54,7 @@ I. FAILURE RECOVERY RESULTS
 J. PARALLEL MULTI-CHUNK & RIGHT-SIZING RESULTS (STAGE 8)
   Proof 8A: Live Worker Capability Matrix verified; capability-tagged workload routed strictly to capable host.
   Proof 8B: ClusterSizer evaluated 10 available PCs for a 2-chunk workload -> exactly 2 selected, 8 kept in reserve.
-  Proof 8C: Multi-chunk split-and-merge executed in parallel across workers (worker-a + worker-b); output deterministically merged.
+  Proof 8C: Multi-chunk split-and-merge executed in parallel across workers (pc-a + pc-b); output deterministically merged.
 
 K. CODE BUGS DISCOVERED
   None. All production orchestration, CAS transfers, and adapter pipelines operated within specifications.

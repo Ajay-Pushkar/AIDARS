@@ -1409,7 +1409,7 @@ class AIDARValidationHarness:
         # Capability-Aware Routing Verification
         target_cap_key = None
         target_cap_worker = None
-        for key in ["cap:ollama", "cap:blender", "cap:ffmpeg"]:
+        for key in ["cap:blender", "cap:ffmpeg", "cap:pytorch", "cap:ollama"]:
             pos_workers = [w["worker_id"] for w in workers_data if w.get("tags", {}).get(key) == "true"]
             neg_workers = [w["worker_id"] for w in workers_data if w.get("tags", {}).get(key) == "false"]
             if pos_workers and neg_workers:
@@ -1417,59 +1417,58 @@ class AIDARValidationHarness:
                 target_cap_worker = pos_workers[0]
                 break
 
-        if target_cap_key:
-            print_info(f"Submitting capability-routed workload requiring {target_cap_key}='true' (expected target: {target_cap_worker})...")
-            probe_spec = WorkloadSpec(
-                workload_id=f"cap-route-{uuid.uuid4().hex[:8]}",
-                task_type="custom_script",
-                required_worker_tags={target_cap_key: "true"},
-                min_cpu_cores=1,
-            )
-        else:
-            print_info("Testing capability-routed workload requiring cap:python='true'...")
-            probe_spec = WorkloadSpec(
-                workload_id=f"cap-route-{uuid.uuid4().hex[:8]}",
-                task_type="custom_script",
-                required_worker_tags={"cap:python": "true"},
-                min_cpu_cores=1,
-            )
+        if not target_cap_key:
+            target_cap_key = "cap:python"
             target_cap_worker = workers_data[0]["worker_id"]
 
-        submit_resp = await self.http.post(
-            f"{self.coordinator_url}/api/v1/workloads/submit",
-            json=probe_spec.model_dump(mode="json"),
+        print_info(f"Submitting capability-routed workload requiring {target_cap_key}='true' (expected target: {target_cap_worker})...")
+        cap_wid = f"cap-route-{uuid.uuid4().hex[:8]}"
+        probe_spec = WorkloadSpec(
+            workload_id=cap_wid,
+            task_type="custom_script",
+            min_cpu_cores=1,
+            min_ram_bytes=64 * 1024 * 1024,
+            requires_gpu=False,
+            required_worker_tags={target_cap_key: "true"},
+            execution_spec=ExecutionSpec(
+                executable="python",
+                args=["-c", "import pathlib, os; os.makedirs('outputs', exist_ok=True); pathlib.Path('outputs/cap_routed.txt').write_text('CAP_ROUTED_OK')"]
+            ),
+        )
+
+        job_resp = await self.http.post(
+            f"{self.coordinator_url}/api/v1/jobs/submit",
+            json={"specs": [probe_spec.model_dump(mode="json")], "execution_shape": "single_machine", "worker_count": 1},
             headers=self._headers(),
         )
-        if submit_resp.status_code not in (200, 201, 202):
-            print_error(f"Capability-routed workload submission failed: {submit_resp.text}")
+        if job_resp.status_code not in (200, 201, 202):
+            print_error(f"Capability-routed job submission failed: HTTP {job_resp.status_code} -> {job_resp.text}")
             res.result_status = "FAILED"
             return res
 
-        cap_wid = probe_spec.workload_id
-        cap_routed_worker = None
-        for _ in range(30):
-            w_status_resp = await self.http.get(f"{self.coordinator_url}/api/v1/workloads/{cap_wid}", headers=self._headers())
-            if w_status_resp.status_code == 200:
-                w_info = w_status_resp.json()
-                plc = w_info.get("placement") or w_info.get("placement_decision") or {}
-                if plc.get("selected_worker_id"):
-                    cap_routed_worker = plc["selected_worker_id"]
-                    break
-                elif w_info.get("selected_worker_id"):
-                    cap_routed_worker = w_info["selected_worker_id"]
-                    break
-            await asyncio.sleep(0.5)
+        cap_data = await self.poll_workload_completion(cap_wid, max_wait_seconds=30.0)
+        placed_worker = (
+            (cap_data.get("placement") or {}).get("selected_worker_id")
+            or (cap_data.get("result") or {}).get("worker_id")
+            or ((cap_data.get("attempts") or [{}])[-1].get("worker_id"))
+        )
 
-        if not cap_routed_worker:
+        if not placed_worker:
             print_error(f"Capability routing did not place workload {cap_wid}")
             res.result_status = "FAILED"
             return res
 
-        if target_cap_key and cap_routed_worker != target_cap_worker:
-            print_error(f"Capability routing mismatch: routed to {cap_routed_worker}, expected {target_cap_worker}")
+        if placed_worker != target_cap_worker:
+            print_error(f"Capability routing mismatch: routed to {placed_worker}, expected {target_cap_worker}")
             res.result_status = "FAILED"
             return res
-        print_success(f"Proof 8A Verified: Workload routed to {cap_routed_worker} based on capability tags!")
+
+        if cap_data.get("state") != WorkloadState.COMPLETED.value:
+            print_error(f"Capability-routed workload did not complete: state={cap_data.get('state')}, err={cap_data.get('error_message')}")
+            res.result_status = "FAILED"
+            return res
+
+        print_success(f"[+] Sub-stage 8A Verified: Capability-routed workload ({target_cap_key}='true') placed and completed on {placed_worker} (rejected other workers).")
 
         # --------------------------------------------------------------------
         # Sub-stage 8B: Right-Sized Cluster Selection Proof (10 PCs Available -> Select Only 2)
@@ -1481,7 +1480,7 @@ class AIDARValidationHarness:
         cluster_sizer = ClusterSizer()
         profiles_10 = [
             WorkerResourceProfile(
-                worker_id=f"pc-{i}",
+                worker_id=f"pc-{i:02d}",
                 endpoint_url=f"http://192.168.29.{100+i}:8001",
                 ip_address=f"192.168.29.{100+i}",
                 cpu_cores_total=4,
@@ -1492,12 +1491,14 @@ class AIDARValidationHarness:
             )
             for i in range(1, 11)
         ]
-        tags_10 = {f"pc-{i}": {"cap:python": "true"} for i in range(1, 11)}
+        tags_10 = {f"pc-{i:02d}": {"cap:python": "true"} for i in range(1, 11)}
         sizing_req = SizingRequest(
-            request_id=f"sizing-proof-{uuid.uuid4().hex[:8]}",
+            request_id="rightsize-demo",
+            task_type="blender",
             total_units=2,
-            unit_workload_seconds=5.0,
-            min_cpu_cores=1,
+            unit_workload_seconds=10.0,
+            min_cpu_cores=2,
+            min_ram_bytes=256 * 1024 * 1024,
         )
         sizing_decision = cluster_sizer.size_cluster(sizing_req, profiles_10, worker_tags=tags_10)
 
@@ -1510,7 +1511,7 @@ class AIDARValidationHarness:
 
         assert len(sizing_decision.selected_worker_ids) == 2, f"Expected 2 selected, got {len(sizing_decision.selected_worker_ids)}"
         assert len(sizing_decision.spare_worker_ids) == 8, f"Expected 8 spares, got {len(sizing_decision.spare_worker_ids)}"
-        print_success("Proof 8B Verified: 10 PCs available -> Exactly 2 PCs selected, 8 kept in reserve as spares!")
+        print_success(f"[+] Sub-stage 8B Verified: Given 10 eligible PCs for a 2-unit workload, ClusterSizer selected ONLY 2 active PCs ({sizing_decision.selected_worker_ids}) and held 8 PCs in reserve ({sizing_decision.spare_worker_ids}).")
 
         # --------------------------------------------------------------------
         # Sub-stage 8C: Live Parallel Multi-Chunk Split & Merge Across Physical PCs
@@ -1518,7 +1519,7 @@ class AIDARValidationHarness:
         print_info("\nSub-stage 8C: Live Parallel Multi-Chunk Split & Merge Across Physical Workers...")
         raw_asset = os.urandom(64 * 1024)
         shared_asset_hash = hashlib.sha256(raw_asset).hexdigest()
-        worker_a = self.registered_workers[0]
+        worker_a = next((w for w in self.registered_workers if "pc-a" in w["worker_id"] or "worker-a" in w["worker_id"]), self.registered_workers[0])
         worker_a_url = worker_a["endpoint_url"]
         worker_a_id = worker_a["worker_id"]
         print_info(f"Uploading shared input asset to {worker_a_id} CAS ({len(raw_asset)} bytes, SHA-256={shared_asset_hash[:16]}...)...")
@@ -1545,45 +1546,45 @@ class AIDARValidationHarness:
         chunk_1_id = f"{job_id}-chunk-1"
 
         cmd_0 = (
-            f"python -c \""
-            f"import os, hashlib, time; "
-            f"time.sleep(2.5); "
+            "import os, hashlib, time; "
+            "time.sleep(2.0); "
             f"in_path = os.path.join('inputs', '{uploaded_hash}'); "
-            f"data = open(in_path, 'rb').read(); "
-            f"h = hashlib.sha256(data + b':chunk_0').hexdigest(); "
-            f"os.makedirs('outputs', exist_ok=True); "
-            f"open('outputs/chunk_0.txt', 'w').write(h); "
-            f"print(f'CHUNK 0 PRODUCED: {{h}}')\""
+            "data = open(in_path, 'rb').read(); "
+            "h = hashlib.sha256(data + b':chunk_0').hexdigest(); "
+            "os.makedirs('outputs', exist_ok=True); "
+            "open('outputs/chunk_0.txt', 'w').write(h); "
+            "print(f'CHUNK 0 PRODUCED: {h}')"
         )
         cmd_1 = (
-            f"python -c \""
-            f"import os, hashlib, time; "
-            f"time.sleep(2.5); "
+            "import os, hashlib, time; "
+            "time.sleep(2.0); "
             f"in_path = os.path.join('inputs', '{uploaded_hash}'); "
-            f"data = open(in_path, 'rb').read(); "
-            f"h = hashlib.sha256(data + b':chunk_1').hexdigest(); "
-            f"os.makedirs('outputs', exist_ok=True); "
-            f"open('outputs/chunk_1.txt', 'w').write(h); "
-            f"print(f'CHUNK 1 PRODUCED: {{h}}')\""
+            "data = open(in_path, 'rb').read(); "
+            "h = hashlib.sha256(data + b':chunk_1').hexdigest(); "
+            "os.makedirs('outputs', exist_ok=True); "
+            "open('outputs/chunk_1.txt', 'w').write(h); "
+            "print(f'CHUNK 1 PRODUCED: {h}')"
         )
 
         spec_0 = WorkloadSpec(
             workload_id=chunk_0_id,
             job_id=job_id,
-            task_type="test",
+            task_type="custom_script",
             input_asset_hashes={uploaded_hash},
             min_cpu_cores=1,
             min_ram_bytes=64 * 1024 * 1024,
-            parameters={"command": cmd_0},
+            requires_gpu=False,
+            execution_spec=ExecutionSpec(executable="python", args=["-c", cmd_0]),
         )
         spec_1 = WorkloadSpec(
             workload_id=chunk_1_id,
             job_id=job_id,
-            task_type="test",
+            task_type="custom_script",
             input_asset_hashes={uploaded_hash},
             min_cpu_cores=1,
             min_ram_bytes=64 * 1024 * 1024,
-            parameters={"command": cmd_1},
+            requires_gpu=False,
+            execution_spec=ExecutionSpec(executable="python", args=["-c", cmd_1]),
         )
 
         print_info(f"Submitting 2-chunk TASK_SPLIT parallel job {job_id} to /api/v1/jobs/submit...")
@@ -1620,12 +1621,12 @@ class AIDARValidationHarness:
         res.executed = True
         res.completed = True
 
-        w0 = (data_0.get("placement") or {}).get("selected_worker_id", "unknown")
-        w1 = (data_1.get("placement") or {}).get("selected_worker_id", "unknown")
+        w0 = (data_0.get("result") or {}).get("worker_id") or (data_0.get("placement") or {}).get("selected_worker_id", "unknown")
+        w1 = (data_1.get("result") or {}).get("worker_id") or (data_1.get("placement") or {}).get("selected_worker_id", "unknown")
         att_0 = (data_0.get("attempts") or [{}])[-1]
         att_1 = (data_1.get("attempts") or [{}])[-1]
-        t0_s, t0_e = att_0.get("started_at_utc", 0.0), att_0.get("completed_at_utc", 0.0)
-        t1_s, t1_e = att_1.get("started_at_utc", 0.0), att_1.get("completed_at_utc", 0.0)
+        t0_s, t0_e = att_0.get("started_at", 0.0) or att_0.get("started_at_utc", 0.0), att_0.get("finished_at", 0.0) or att_0.get("completed_at_utc", 0.0)
+        t1_s, t1_e = att_1.get("started_at", 0.0) or att_1.get("started_at_utc", 0.0), att_1.get("finished_at", 0.0) or att_1.get("completed_at_utc", 0.0)
 
         print(f"\n{Colors.BOLD}PARALLEL MULTI-CHUNK EXECUTION PROOF:{Colors.RESET}")
         print(f"  {chunk_0_id}: executed on {Colors.CYAN}{w0}{Colors.RESET} (started={t0_s:.2f}, completed={t0_e:.2f}, dur={t0_e-t0_s:.2f}s)")
@@ -1665,7 +1666,7 @@ class AIDARValidationHarness:
             print_info(f"Merged output (chunk-0 + chunk-1) deterministic SHA-256: {merged_hash}")
             res.output_verified = True
 
-        print_success("Stage 8 Complete: Proofs 8A, 8B, and 8C all successfully verified!")
+        print_success("[+] Stage 8 Verified: Capability routing, 2-of-10 right-sizing, and parallel multi-PC split & merge verified!")
         res.result_status = "VERIFIED"
         return res
 

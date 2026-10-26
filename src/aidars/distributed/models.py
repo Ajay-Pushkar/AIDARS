@@ -902,6 +902,18 @@ class WorkloadSpec(BaseModel):
     parameters: Dict[str, Any] = Field(default_factory=dict)
     execution_spec: Optional["ExecutionSpec"] = Field(default=None)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _remap_tags_alias(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "required_tags" in data and "required_worker_tags" not in data:
+                data["required_worker_tags"] = data["required_tags"]
+        return data
+
+    @property
+    def required_tags(self) -> Dict[str, str]:
+        return self.required_worker_tags
+
     @field_validator("input_asset_hashes")
     @classmethod
     def validate_hashes(cls, v: Set[str]) -> Set[str]:

@@ -155,10 +155,11 @@ class PlacementEngine:
                     "result": p.gpu_driver_version == spec.required_driver_version}
             if spec.required_runtime_compatibility:
                 checks["runtime_compatibility"] = {"required": spec.required_runtime_compatibility, "actual": None, "result": False}
-            if spec.required_worker_tags:
-                checks["required_worker_tags"] = {"required": spec.required_worker_tags,
-                    "actual": {k: tags.get(k) for k in spec.required_worker_tags},
-                    "result": self._tag_result(tags, spec.required_worker_tags)}
+            req_tags = {**getattr(spec, "required_worker_tags", {}), **getattr(spec, "required_tags", {})}
+            if req_tags:
+                checks["required_worker_tags"] = {"required": req_tags,
+                    "actual": {k: tags.get(k) for k in req_tags},
+                    "result": self._tag_result(tags, req_tags)}
             previous_workers = group_workers.get(spec.affinity_group_id or "", set())
             affinity_match = True
             if spec.affinity_mode == "same_worker" and previous_workers:

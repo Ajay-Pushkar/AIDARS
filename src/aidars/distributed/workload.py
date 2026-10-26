@@ -475,7 +475,7 @@ class WorkloadOrchestrator:
                 # Explicit integer worker_count contract (worker_count=N)
                 async with self._placement_lock:
                     all_workers = self.registry.list_workers(active_only=False)
-                    worker_tags = {w.worker_id: dict(w.tags) for w in all_workers}
+                    worker_tags = self._effective_worker_tags(all_workers)
                     profiles = self._build_worker_profiles(all_workers)
                     sizing_req = SizingRequest(max_workers_limit=worker_count, **req_kwargs)
                     probe_spec = self.cluster_sizer.build_probe_spec(sizing_req, time.time())
@@ -501,7 +501,7 @@ class WorkloadOrchestrator:
                 sizing_req = SizingRequest(**req_kwargs)
                 async with self._placement_lock:
                     all_workers = self.registry.list_workers(active_only=False)
-                    worker_tags = {w.worker_id: dict(w.tags) for w in all_workers}
+                    worker_tags = self._effective_worker_tags(all_workers)
                     profiles = self._build_worker_profiles(all_workers)
                     decision = self.cluster_sizer.size_cluster(sizing_req, profiles, worker_tags=worker_tags)
 
@@ -539,6 +539,27 @@ class WorkloadOrchestrator:
             execution_shape=description.execution_shape,
             required_worker_count=description.required_worker_count,
         )
+
+    def _effective_worker_tags(self, workers) -> dict[str, dict[str, str]]:
+        """Return worker tags enriched with any declared worker capabilities."""
+        result: dict[str, dict[str, str]] = {}
+        for w in workers:
+            tags = dict(getattr(w, "tags", {}) or {})
+            caps_raw = getattr(w, "capabilities", None)
+            caps_list: list[str] = []
+            if isinstance(caps_raw, list):
+                caps_list = [str(c) for c in caps_raw]
+            elif isinstance(caps_raw, dict):
+                caps_list = [str(c) for c in caps_raw.get("extra", {}).get("capabilities", [])]
+            elif hasattr(caps_raw, "extra") and isinstance(caps_raw.extra, dict):
+                caps_list = [str(c) for c in caps_raw.extra.get("capabilities", [])]
+
+            for cap in caps_list:
+                cap_key = f"cap:{str(cap).lower()}"
+                if cap_key not in tags:
+                    tags[cap_key] = "true"
+            result[w.worker_id] = tags
+        return result
 
     def _build_worker_profiles(self, workers):
         """Merge worker hardware snapshots with coordinator-owned state."""
@@ -844,7 +865,7 @@ class WorkloadOrchestrator:
                         and r.placement_decision is not None
                     }
                 placement_kwargs = dict(
-                    worker_tags={w.worker_id: dict(w.tags) for w in workers},
+                    worker_tags=self._effective_worker_tags(workers),
                     group_workers=group_workers,
                     predicted_duration_seconds=self._predicted_duration(spec)[0],
                     asset_sizes_bytes=self._trusted_asset_sizes(spec),
