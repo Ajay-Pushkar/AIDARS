@@ -1587,19 +1587,32 @@ class AIDARValidationHarness:
             execution_spec=ExecutionSpec(executable="python", args=["-c", cmd_1]),
         )
 
+        worker_ids_all = [w["worker_id"] for w in self.registered_workers if w.get("status") == "active"]
+        selected_workers = worker_ids_all[:2] if len(worker_ids_all) >= 2 else None
+
         print_info(f"Submitting 2-chunk TASK_SPLIT parallel job {job_id} to /api/v1/jobs/submit...")
         job_submit_body = {
             "specs": [spec_0.model_dump(mode="json"), spec_1.model_dump(mode="json")],
             "execution_shape": "task_split",
             "worker_count": 2,
         }
-        job_resp = await self.http.post(
-            f"{self.coordinator_url}/api/v1/jobs/submit",
-            json=job_submit_body,
-            headers=self._headers(),
-        )
-        if job_resp.status_code not in (200, 201, 202):
-            print_error(f"Failed to submit multi-chunk job: HTTP {job_resp.status_code} -> {job_resp.text}")
+        if selected_workers and len(selected_workers) == 2:
+            job_submit_body["selected_worker_ids"] = selected_workers
+
+        job_resp = None
+        for attempt in range(4):
+            job_resp = await self.http.post(
+                f"{self.coordinator_url}/api/v1/jobs/submit",
+                json=job_submit_body,
+                headers=self._headers(),
+            )
+            if job_resp.status_code in (200, 201, 202):
+                break
+            if attempt < 3:
+                await asyncio.sleep(2.0)
+
+        if job_resp is None or job_resp.status_code not in (200, 201, 202):
+            print_error(f"Failed to submit multi-chunk job: HTTP {job_resp.status_code if job_resp else 'None'} -> {job_resp.text if job_resp else ''}")
             res.result_status = "FAILED"
             return res
 
