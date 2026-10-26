@@ -206,21 +206,23 @@ class GenericSubprocessRuntime(RuntimeAdapter):
                     # while preserving the original ExecutionSpec contract for unit tests.
                     working_dir = getattr(context, "working_directory", None) or workdir
                     resolved_args: list[str] = []
-                    for arg in args:
+                    for i, arg in enumerate(args):
                         if (
                             isinstance(arg, str)
                             and arg.startswith("inputs/")
                             and not arg.endswith((".blend", ".py"))
                         ):
                             abs_src = os.path.join(str(working_dir), arg)
-                            abs_blend = f"{abs_src}.blend"
-                            if os.path.exists(abs_src) and not os.path.exists(abs_blend):
+                            is_python_script = (i > 0 and args[i - 1] in ("-P", "--python"))
+                            target_ext = ".py" if is_python_script else ".blend"
+                            abs_target = f"{abs_src}{target_ext}"
+                            if os.path.exists(abs_src) and not os.path.exists(abs_target):
                                 try:
-                                    os.link(abs_src, abs_blend)
+                                    os.link(abs_src, abs_target)
                                 except OSError:
-                                    shutil.copy2(abs_src, abs_blend)
-                            if os.path.exists(abs_blend):
-                                resolved_args.append(f"{arg}.blend")
+                                    shutil.copy2(abs_src, abs_target)
+                            if os.path.exists(abs_target):
+                                resolved_args.append(f"{arg}{target_ext}")
                                 continue
                         resolved_args.append(arg)
                     args = resolved_args

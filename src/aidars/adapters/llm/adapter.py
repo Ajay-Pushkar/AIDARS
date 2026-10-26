@@ -24,7 +24,10 @@ _LLM_WORKER_RUNNER_CODE = (
     "            req = urllib.request.Request(f'{ollama_url}/api/generate', data=body, headers={'Content-Type': 'application/json'}, method='POST')\n"
     "            with urllib.request.urlopen(req, timeout=120.0) as r:\n"
     "                payload = json.loads(r.read().decode('utf-8'))\n"
-    "                resp_text = payload.get('response', '')\n"
+    "                raw_resp = payload.get('response', '').strip()\n"
+    "                raw_think = payload.get('thinking', '').strip()\n"
+    "                resp_text = raw_resp if raw_resp else raw_think\n"
+    "                if raw_resp and raw_think: resp_text = f'{raw_resp}\\n\\n[Reasoning: {raw_think[:200]}...]'\n"
     "        except Exception as exc:\n"
     "            if os.environ.get('AIDAR_LLM_REQUIRE_LIVE', '0') == '1':\n"
     "                raise\n"
@@ -48,7 +51,7 @@ class LLMAdapter(ApplicationAdapter):
 
     def validate(self, request: dict) -> bool:
         """Validate LLM specific request."""
-        if "prompt" not in request:
+        if "prompt" not in request and "prompts" not in request:
             return False
         return True
 
@@ -57,8 +60,18 @@ class LLMAdapter(ApplicationAdapter):
         model_identifier = request.get("model") or request.get("model_identifier") or request.get("model_path") or "default-model"
         model_path = request.get("model_path")
         prompt = request.get("prompt", "")
+        raw_prompts = request.get("prompts")
+        if raw_prompts and isinstance(raw_prompts, list):
+            prompt_list = [str(p) for p in raw_prompts]
+        elif prompt:
+            prompt_list = [str(prompt)]
+        else:
+            prompt_list = ["Hello"]
+
         max_tokens = request.get("max_tokens", 256)
         requires_gpu = request.get("requires_gpu", True)
+        worker_count = int(request.get("worker_count", 1))
+        min_cpu_cores = int(request.get("min_cpu_cores", 4))
         
         # M4: Physical asset resolution
         input_asset_hashes = set()
@@ -73,20 +86,47 @@ class LLMAdapter(ApplicationAdapter):
             if self.asset_manager:
                 self.asset_manager.upload_asset_file(model_path, model_hash)
 
-        # Protect prompt from broad logs: use a generic prefix instead of embedding prompt text
-        prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:8]
         job_id = f"llm-job-{uuid.uuid4().hex[:16]}"
         
         # Estimate requirements based on parameters
         min_vram_bytes = 4 * 1024 * 1024 * 1024 if requires_gpu else 0
-        min_ram_bytes = 8 * 1024 * 1024 * 1024
-        
+        min_ram_bytes = int(request.get("min_ram_bytes", 8 * 1024 * 1024 * 1024))
+
+        if len(prompt_list) > 1 and worker_count > 1:
+            specs = []
+            for idx, p in enumerate(prompt_list):
+                wid = f"{job_id}-chunk-{idx}"
+                spec = WorkloadSpec(
+                    workload_id=wid,
+                    job_id=job_id,
+                    task_type="llm_inference",
+                    input_asset_hashes=input_asset_hashes,
+                    min_cpu_cores=min_cpu_cores,
+                    min_ram_bytes=min_ram_bytes,
+                    requires_gpu=requires_gpu,
+                    min_vram_bytes=min_vram_bytes,
+                    estimated_duration_seconds=float(max_tokens) * 0.5,
+                    parameters={
+                        "model": model_identifier,
+                        "model_identifier": model_identifier,
+                        "model_hash": model_hash,
+                        "prompt": p,
+                        "prompts": [p],
+                        "max_tokens": max_tokens,
+                        "chunk_index": idx,
+                    }
+                )
+                spec.execution_spec = self.build_execution_spec(spec)
+                specs.append(spec)
+            return specs
+
+        prompt_hash = hashlib.md5(prompt_list[0].encode()).hexdigest()[:8]
         spec = WorkloadSpec(
             workload_id=f"{job_id}-{prompt_hash}",
             job_id=job_id,
             task_type="llm_inference",
             input_asset_hashes=input_asset_hashes,
-            min_cpu_cores=4,
+            min_cpu_cores=min_cpu_cores,
             min_ram_bytes=min_ram_bytes,
             requires_gpu=requires_gpu,
             min_vram_bytes=min_vram_bytes,
@@ -95,8 +135,8 @@ class LLMAdapter(ApplicationAdapter):
                 "model": model_identifier,
                 "model_identifier": model_identifier,
                 "model_hash": model_hash,
-                "prompt": prompt,
-                "prompts": [prompt] if prompt else ["Hello"],
+                "prompt": prompt_list[0],
+                "prompts": prompt_list,
                 "max_tokens": max_tokens,
             }
         )

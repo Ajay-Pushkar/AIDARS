@@ -10,7 +10,7 @@ AIDAR REAL VALIDATION FINAL REPORT
 | Stage 2: CAS Asset Transfer | [x] | [x] | pc-b | [x] | [x] | [x] | **VERIFIED** |
 | Stage 3: Blender | [x] | [x] | pc-a | [x] | [x] | [x] | **VERIFIED** |
 | Stage 4: FFmpeg Video Processing | [x] | [x] | pc-a | [x] | [x] | [x] | **VERIFIED** |
-| Stage 5: Local LLM Inference | [x] | [x] | pc-a | [x] | [x] | [x] | **VERIFIED** |
+| Stage 5: Local LLM Inference | [x] | [x] | pc-a + pc-b | [x] | [x] | [x] | **VERIFIED** |
 | Stage 6: ML Training | [x] | [x] | pc-a | [x] | [x] | [x] | **VERIFIED** |
 | Stage 7: Worker Failure Recovery | [x] | [x] | pc-a | [x] | [x] | [-] | **VERIFIED** |
 | Stage 8: Parallel Split/Merge & Right-Sizing | [x] | [x] | pc-a + pc-b | [x] | [x] | [x] | **VERIFIED** |
@@ -29,9 +29,9 @@ A. ENVIRONMENT
 
 B. WORKER TOPOLOGY
   Worker 1: pc-a @ http://192.168.29.234:8001 (Status: active)
-    CPUs: 14 | RAM Avail: 6.2 GB | GPU: False
-  Worker 2: pc-b @ http://192.168.29.47:8002 (Status: active)
-    CPUs: 4 | RAM Avail: 1.9 GB | GPU: False
+    CPUs: 14 | RAM Avail: 6.7 GB | GPU: False
+  Worker 2: pc-b @ http://192.168.29.234:8002 (Status: active)
+    CPUs: 14 | RAM Avail: 6.7 GB | GPU: False
 
 C. CONNECTIVITY RESULTS
   Coordinator ping and worker registration queries succeeded with HTTP 200.

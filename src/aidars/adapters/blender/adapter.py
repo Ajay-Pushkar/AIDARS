@@ -126,6 +126,10 @@ class BlenderAdapter(ApplicationAdapter):
         # prefix.
         job_id = f"job-{uuid.uuid4().hex[:16]}"
 
+        remap_script_hash_param = request.get("remap_script_hash")
+        if remap_script_hash_param:
+            input_asset_hashes.add(str(remap_script_hash_param))
+
         specs = []
         for idx, chunk in enumerate(plan.chunks):
             params = {
@@ -141,6 +145,13 @@ class BlenderAdapter(ApplicationAdapter):
                 "job_frame_start": frame_start,
                 "job_frame_end": frame_end,
             }
+            if remap_script_hash_param:
+                params["remap_script_hash"] = str(remap_script_hash_param)
+            if "engine" in request:
+                params["engine"] = request["engine"]
+            if "blender_executable" in request:
+                params["blender_executable"] = request["blender_executable"]
+
             if "min_ram_bytes" not in request and total_asset_bytes == 0:
                 params["resource_requirement_confidence"] = "unverified"
                 params["ram_requirement_state"] = "undeclared_unconstrained"
@@ -194,8 +205,11 @@ class BlenderAdapter(ApplicationAdapter):
             or "blender"
         )
         remap_script_hash = spec.parameters.get("remap_script_hash")
+        engine = spec.parameters.get("engine")
 
         args = ["-b", f"inputs/{scene_hash}"]
+        if engine:
+            args.extend(["-E", str(engine)])
         if remap_script_hash:
             args.extend(["--python", f"inputs/{remap_script_hash}"])
         args.extend([
