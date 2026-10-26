@@ -447,6 +447,11 @@ class WorkloadOrchestrator:
 
         if assigned_workers is None and execution_shape in (ExecutionShape.TASK_SPLIT, ExecutionShape.PIPELINE, ExecutionShape.SINGLE_MACHINE):
             sample_spec = stamped_specs[0]
+            common_tags: Dict[str, str] = {}
+            for s in stamped_specs:
+                if s.required_worker_tags:
+                    common_tags.update(s.required_worker_tags)
+
             req_kwargs = {
                 "request_id": f"job-{job_id}",
                 "task_type": sample_spec.task_type,
@@ -457,6 +462,9 @@ class WorkloadOrchestrator:
                 "min_ram_bytes": max((s.min_ram_bytes for s in stamped_specs), default=None),
                 "requires_gpu": any(s.requires_gpu for s in stamped_specs),
                 "min_vram_bytes": max(s.min_vram_bytes for s in stamped_specs),
+                "required_worker_tags": common_tags,
+                "execution_spec": sample_spec.execution_spec,
+                "parameters": sample_spec.parameters,
                 "input_asset_hashes": set().union(*(s.input_asset_hashes for s in stamped_specs)),
                 "asset_sizes_bytes": self._trusted_asset_sizes(sample_spec),
             }
@@ -467,10 +475,11 @@ class WorkloadOrchestrator:
                 # Explicit integer worker_count contract (worker_count=N)
                 async with self._placement_lock:
                     all_workers = self.registry.list_workers(active_only=False)
+                    worker_tags = {w.worker_id: dict(w.tags) for w in all_workers}
                     profiles = self._build_worker_profiles(all_workers)
                     sizing_req = SizingRequest(max_workers_limit=worker_count, **req_kwargs)
                     probe_spec = self.cluster_sizer.build_probe_spec(sizing_req, time.time())
-                    self.placement_engine.evaluate(probe_spec, profiles, asset_sizes_bytes=req_kwargs["asset_sizes_bytes"])
+                    self.placement_engine.evaluate(probe_spec, profiles, asset_sizes_bytes=req_kwargs["asset_sizes_bytes"], worker_tags=worker_tags)
                     last_eval = self.placement_engine.last_evaluation or {}
                     eligible_ids = sorted(last_eval.get("eligible_worker_ids", []))
 
@@ -492,8 +501,9 @@ class WorkloadOrchestrator:
                 sizing_req = SizingRequest(**req_kwargs)
                 async with self._placement_lock:
                     all_workers = self.registry.list_workers(active_only=False)
+                    worker_tags = {w.worker_id: dict(w.tags) for w in all_workers}
                     profiles = self._build_worker_profiles(all_workers)
-                    decision = self.cluster_sizer.size_cluster(sizing_req, profiles)
+                    decision = self.cluster_sizer.size_cluster(sizing_req, profiles, worker_tags=worker_tags)
 
                 if decision.recommended_worker_count > 0:
                     assigned_workers = decision.selected_worker_ids
@@ -846,7 +856,20 @@ class WorkloadOrchestrator:
                     decision = group_decisions[0] if group_decisions else None
                     evaluation = dict(getattr(self.placement_engine, "last_group_evaluation", {}))
                 else:
-                    decision = self.placement_engine.evaluate(spec, profiles, **placement_kwargs)
+                    if (
+                        execution_shape == ExecutionShape.TASK_SPLIT
+                        and job_selected_ids is not None
+                        and len(job_selected_ids) > 1
+                    ):
+                        idle_profiles = [p for p in profiles if p.active_workload_count == 0]
+                        busy_profiles = [p for p in profiles if p.active_workload_count > 0]
+                        decision = None
+                        if idle_profiles and busy_profiles:
+                            decision = self.placement_engine.evaluate(spec, idle_profiles, **placement_kwargs)
+                        if decision is None:
+                            decision = self.placement_engine.evaluate(spec, profiles, **placement_kwargs)
+                    else:
+                        decision = self.placement_engine.evaluate(spec, profiles, **placement_kwargs)
                     evaluation = dict(self.placement_engine.last_evaluation)
                 evaluated_ids = {c.get("worker_id") for c in evaluation.get("candidates", [])}
                 for worker in all_workers:

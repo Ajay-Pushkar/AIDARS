@@ -79,6 +79,7 @@ class DistributedWorker:
         http_client: Optional[httpx.AsyncClient] = None,
         can_execute_workloads: bool = True,
         bootstrap_secret: Optional[str] = None,
+        tags: Optional[Dict[str, str]] = None,
     ) -> None:
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
         self.ip_address = ip_address
@@ -92,6 +93,7 @@ class DistributedWorker:
         # node, but PlacementEngine must never select it for compute.
         self.can_execute_workloads = can_execute_workloads
         self.bootstrap_secret = bootstrap_secret
+        self.tags = dict(tags) if tags else {}
         self._last_reported_inventory: Set[str] = set()
 
         # 1. CAS Adapter Initialization
@@ -200,6 +202,7 @@ class DistributedWorker:
             last_heartbeat_utc=time.time(),
             last_metrics=self.node_metrics,
             resource_profile=self.get_resource_profile(),
+            tags=self.tags,
             can_execute_workloads=self.can_execute_workloads,
         )
 
@@ -271,6 +274,7 @@ class DistributedWorker:
             resource_profile=resource_profile,
             capabilities=self.capabilities,
             inventory_hashes=current_inventory,
+            tags=self.tags,
             can_execute_workloads=self.can_execute_workloads,
         )
         resp = await self.client.register_worker(payload, coordinator_url=coord_url)

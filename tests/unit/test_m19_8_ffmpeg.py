@@ -12,13 +12,25 @@ from aidars.core.assets.manager import AssetManager
 def is_ffmpeg_installed():
     return shutil.which("ffmpeg") is not None
 
+import subprocess
+
 @pytest.fixture
 def mock_video_file():
     fd, path = tempfile.mkstemp(suffix=".mp4")
-    with os.fdopen(fd, 'w') as f:
-        f.write("mock_video_data")
+    os.close(fd)
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if ffmpeg_bin:
+        subprocess.run(
+            [ffmpeg_bin, "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=64x64:rate=5", "-pix_fmt", "yuv420p", "-c:v", "libx264", path],
+            capture_output=True,
+            check=False,
+        )
+    else:
+        with open(path, "w") as f:
+            f.write("mock_video_data")
     yield path
-    os.remove(path)
+    if os.path.exists(path):
+        os.remove(path)
 
 @pytest.mark.asyncio
 async def test_m19_8_ffmpeg_distributed_orchestration(mock_video_file):

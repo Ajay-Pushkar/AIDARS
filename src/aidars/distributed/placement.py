@@ -1,6 +1,7 @@
 """Explainable, hard-gated multi-attribute placement."""
 
 import math
+import os
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -223,6 +224,27 @@ class PlacementEngine:
                     if name == "telemetry" and p.timestamp_utc is None:
                         reason = "MISSING_TELEMETRY"
                     reasons.append(reason)
+
+            if any(k.startswith("cap:") for k in tags):
+                task_lower = (spec.task_type or "").lower()
+                exec_base = ""
+                if spec.execution_spec and spec.execution_spec.executable:
+                    exec_base = os.path.basename(spec.execution_spec.executable).lower()
+
+                if (task_lower in ("blender", "blender_render") or exec_base in ("blender", "blender.exe")) and tags.get("cap:blender") == "false":
+                    reasons.append("MISSING_CAPABILITY:blender")
+                if (task_lower in ("ffmpeg", "video_rendering", "video_transcode") or exec_base in ("ffmpeg", "ffmpeg.exe")) and tags.get("cap:ffmpeg") == "false":
+                    reasons.append("MISSING_CAPABILITY:ffmpeg")
+                if task_lower in ("ml_training", "pytorch") and tags.get("cap:pytorch") == "false":
+                    reasons.append("MISSING_CAPABILITY:pytorch")
+                if task_lower in ("llm", "llm_inference"):
+                    needs_live_ollama = bool(
+                        spec.parameters.get("live_ollama")
+                        or (spec.execution_spec and spec.execution_spec.env.get("AIDAR_LLM_LIVE") == "1")
+                    )
+                    if needs_live_ollama and tags.get("cap:ollama") == "false":
+                        reasons.append("MISSING_CAPABILITY:ollama")
+
             locality = self._locality(spec, p, asset_sizes_bytes)
             localities[p.worker_id] = locality
             candidate_explanation: Dict[str, object] = {

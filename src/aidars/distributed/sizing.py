@@ -62,8 +62,11 @@ class SizingRequest(BaseModel):
     min_compute_capability: Optional[str] = None
     required_driver_version: Optional[str] = None
     required_runtime_compatibility: Optional[str] = None
+    required_tags: Dict[str, str] = Field(default_factory=dict)
     required_worker_tags: Dict[str, str] = Field(default_factory=dict)
     preferred_worker_tags: Dict[str, str] = Field(default_factory=dict)
+    execution_spec: Optional[Any] = None
+    parameters: Dict[str, Any] = Field(default_factory=dict)
     affinity_group_id: Optional[str] = None
     affinity_mode: str = "none"
     affinity_tag_key: Optional[str] = None
@@ -175,21 +178,23 @@ class ClusterSizer:
             min_compute_capability=request.min_compute_capability,
             required_driver_version=request.required_driver_version,
             required_runtime_compatibility=request.required_runtime_compatibility,
-            required_worker_tags=request.required_worker_tags,
+            required_worker_tags={**request.required_worker_tags, **request.required_tags},
             preferred_worker_tags=request.preferred_worker_tags,
             affinity_group_id=request.affinity_group_id,
             affinity_mode=request.affinity_mode,
             affinity_tag_key=request.affinity_tag_key,
             affinity_hard=request.affinity_hard,
             max_cost_per_hour=request.max_cost_per_hour,
+            execution_spec=request.execution_spec,
+            parameters=request.parameters,
         )
 
     def size_cluster(
         self,
         request: SizingRequest,
         profiles: List[WorkerResourceProfile],
-        *,
         worker_tags: Optional[Dict[str, Dict[str, str]]] = None,
+        *,
         group_workers: Optional[Dict[str, Set[str]]] = None,
         now_utc: Optional[float] = None,
     ) -> SizingDecision:

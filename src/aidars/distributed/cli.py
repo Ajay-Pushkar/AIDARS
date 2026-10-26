@@ -30,14 +30,55 @@ from typing import List, Optional, Sequence
 logger = logging.getLogger(__name__)
 
 
-def detect_local_capabilities() -> List[str]:
-    """Fast, non-blocking local binary capability probe for worker startup."""
-    caps: List[str] = ["python"]
-    if shutil.which("blender") or os.environ.get("AIDAR_BLENDER_EXECUTABLE"):
+def detect_local_capabilities() -> tuple[list[str], dict[str, str]]:
+    """Auto-detect local runtime binaries and libraries for worker registration."""
+    import importlib.util
+    import urllib.request
+    import json as _json
+    from aidars.distributed.runtime import (
+        _resolve_blender_executable,
+        _resolve_ffmpeg_executable,
+    )
+
+    caps: list[str] = ["python", "custom_script"]
+    tags: dict[str, str] = {
+        "cap:python": "true",
+        "cap:custom_script": "true",
+        "cap:blender": "false",
+        "cap:ffmpeg": "false",
+        "cap:pytorch": "false",
+        "cap:ollama": "false",
+    }
+
+    blender_bin = _resolve_blender_executable("blender")
+    if shutil.which(blender_bin) or os.path.exists(blender_bin):
         caps.append("blender")
-    if shutil.which("ffmpeg"):
-        caps.append("ffmpeg")
-    return caps
+        tags["cap:blender"] = "true"
+
+    ffmpeg_bin = _resolve_ffmpeg_executable("ffmpeg")
+    if shutil.which(ffmpeg_bin) or os.path.exists(ffmpeg_bin):
+        caps.extend(["ffmpeg", "video_rendering"])
+        tags["cap:ffmpeg"] = "true"
+
+    if importlib.util.find_spec("torch") is not None:
+        caps.extend(["pytorch", "ml_training"])
+        tags["cap:pytorch"] = "true"
+
+    ollama_url = os.environ.get("AIDAR_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+    try:
+        req = urllib.request.Request(f"{ollama_url}/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            if resp.status == 200:
+                data = _json.loads(resp.read().decode("utf-8", errors="replace"))
+                models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+                caps.extend(["llm", "ollama"])
+                tags["cap:ollama"] = "true"
+                if models:
+                    tags["ollama_models"] = ",".join(models)
+    except Exception:
+        pass
+
+    return sorted(set(caps)), tags
 
 
 def _env_float(name: str, default: float) -> float:
@@ -213,6 +254,10 @@ def build_worker_arg_parser() -> argparse.ArgumentParser:
         "--heartbeat-interval-seconds", type=float,
         default=_env_float("AIDAR_HEARTBEAT_INTERVAL_SECONDS", 5.0),
     )
+    parser.add_argument(
+        "--tag", action="append", default=[],
+        help="Worker tag in key=value format (repeatable).",
+    )
     parser.add_argument("--log-level", default=os.environ.get("AIDAR_LOG_LEVEL", "INFO"))
     return parser
 
@@ -225,6 +270,7 @@ def run_worker(argv: Optional[Sequence[str]] = None) -> None:
 
     import uvicorn
     from aidars.distributed.cas_adapter import LocalCASAdapter
+    from aidars.distributed.models import WorkerCapabilities
     from aidars.distributed.worker import DistributedWorker
 
     worker_id = args.worker_id or f"worker-{os.getpid()}"
@@ -235,6 +281,18 @@ def run_worker(argv: Optional[Sequence[str]] = None) -> None:
         cas_kwargs["staging_dir"] = args.staging_dir
     cas = LocalCASAdapter(**cas_kwargs)
 
+    detected_caps, detected_tags = detect_local_capabilities()
+    merged_tags = dict(detected_tags)
+    for t in getattr(args, "tag", []):
+        if "=" in t:
+            k, v = t.split("=", 1)
+            merged_tags[k.strip()] = v.strip()
+        else:
+            merged_tags[t.strip()] = "true"
+
+    worker_caps = WorkerCapabilities()
+    worker_caps.extra["capabilities"] = detected_caps
+
     # DistributedWorker builds its own WorkerServer/ExecutionManager
     # internally from cas_adapter/ip_address/port -- this launcher does
     # not duplicate that wiring, only supplies the configuration.
@@ -244,6 +302,8 @@ def run_worker(argv: Optional[Sequence[str]] = None) -> None:
         ip_address=ip_address,
         port=args.port,
         coordinator_url=args.coordinator_url,
+        capabilities=worker_caps,
+        tags=merged_tags,
         capacity_bytes=args.capacity_bytes,
         heartbeat_interval_seconds=args.heartbeat_interval_seconds,
         bootstrap_secret=args.bootstrap_secret,

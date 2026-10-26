@@ -123,6 +123,8 @@ def _make_cluster_orchestrator(
             capacity_bytes=spec.get("capacity_bytes", 1024**3),
             used_bytes=0,
             resource_profile=profile,
+            tags=spec.get("tags", {}),
+            inventory_hashes=spec.get("inventory_hashes", set()),
         )
         worker_registry.register_worker(info)
 
@@ -834,3 +836,186 @@ def test_exceeding_resource_requirements_rejected():
     assert cand is not None
     assert cand["eligible"] is False
     assert "INSUFFICIENT_RAM" in cand["rejection_reasons"]
+
+
+# ============================================================================
+# M2-18: Capability-Aware Routing & Backward Compatibility
+# ============================================================================
+
+def test_runtime_capability_routing():
+    """Verify PlacementEngine checks advertised cap:* tags and enforces capabilities
+    while preserving backward compatibility for synthetic workers without cap:* tags.
+    """
+    engine = PlacementEngine()
+
+    p_a = _make_profile("worker-no-blender", cpu_cores=8, ram_gb=16.0)
+    p_b = _make_profile("worker-has-blender", cpu_cores=4, ram_gb=8.0)
+    p_synth = _make_profile("worker-synthetic", cpu_cores=4, ram_gb=8.0)
+
+    worker_tags = {
+        "worker-no-blender": {"cap:python": "true", "cap:blender": "false", "cap:ffmpeg": "true"},
+        "worker-has-blender": {"cap:python": "true", "cap:blender": "true", "cap:ffmpeg": "false"},
+        "worker-synthetic": {},  # synthetic test worker: no cap:* tags
+    }
+
+    # 1. Blender workload rejects worker-no-blender, selects worker-has-blender
+    blender_spec = WorkloadSpec(workload_id="blender-1", task_type="blender_render")
+    decision = engine.evaluate(blender_spec, [p_a, p_b], worker_tags=worker_tags)
+    assert decision is not None
+    assert decision.selected_worker_id == "worker-has-blender"
+
+    explanation = engine.last_evaluation
+    cand_a = next(c for c in explanation["candidates"] if c["worker_id"] == "worker-no-blender")
+    assert cand_a["eligible"] is False
+    assert "MISSING_CAPABILITY:blender" in cand_a["rejection_reasons"]
+
+    # 2. FFmpeg workload rejects worker-has-blender, selects worker-no-blender
+    ffmpeg_spec = WorkloadSpec(workload_id="ffmpeg-1", task_type="video_rendering")
+    decision_ff = engine.evaluate(ffmpeg_spec, [p_a, p_b], worker_tags=worker_tags)
+    assert decision_ff is not None
+    assert decision_ff.selected_worker_id == "worker-no-blender"
+
+    cand_b = next(c for c in engine.last_evaluation["candidates"] if c["worker_id"] == "worker-has-blender")
+    assert cand_b["eligible"] is False
+    assert "MISSING_CAPABILITY:ffmpeg" in cand_b["rejection_reasons"]
+
+    # 3. Backward compatibility: synthetic worker with tags={} is eligible
+    decision_synth = engine.evaluate(blender_spec, [p_synth], worker_tags=worker_tags)
+    assert decision_synth is not None
+    assert decision_synth.selected_worker_id == "worker-synthetic"
+
+
+# ============================================================================
+# M2-19: True Parallel Multi-Chunk Idle Worker Spreading
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_parallel_multi_chunk_idle_worker_spreading():
+    """Verify that a multi-chunk TASK_SPLIT job places concurrent chunks across
+    different selected workers (pc-a and pc-b) rather than stacking on a busy worker,
+    even when worker-a has a large cache/CPU advantage.
+    """
+    from aidars.distributed.models import ExecutionShape
+
+    asset_hash = "a" * 64
+    spec_0 = WorkloadSpec(
+        workload_id="split-job-chunk-0",
+        job_id="parallel-split-job",
+        task_type="custom_script",
+        input_asset_hashes={asset_hash},
+        min_cpu_cores=1,
+    )
+    spec_1 = WorkloadSpec(
+        workload_id="split-job-chunk-1",
+        job_id="parallel-split-job",
+        task_type="custom_script",
+        input_asset_hashes={asset_hash},
+        min_cpu_cores=1,
+    )
+
+    chunk_0_hold = asyncio.Event()
+
+    async def mock_handler(request: httpx.Request):
+        import json as _json
+        body_raw = request.content.decode("utf-8", errors="replace")
+        wid = "split-job-chunk-0" if "split-job-chunk-0" in body_raw or "chunk-0" in str(request.url) else "split-job-chunk-1"
+        worker_id = "pc-a" if "pc-a" in str(request.url.host) else "pc-b"
+
+        if wid == "split-job-chunk-0":
+            await chunk_0_hold.wait()
+
+        res = WorkloadExecutionResult(
+            workload_id=wid,
+            worker_id=worker_id,
+            success=True,
+            output_asset_hashes=set(),
+            execution_duration_seconds=0.1,
+        )
+        return httpx.Response(200, json=res.model_dump(mode="json"))
+
+    # worker-a has 14 CPUs and already has the input asset cached locally
+    # worker-b has 4 CPUs and does NOT have the asset cached
+    workers = [
+        {
+            "worker_id": "pc-a",
+            "cpu_cores": 14,
+            "ram_gb": 16.0,
+            "inventory_hashes": {asset_hash},
+        },
+        {
+            "worker_id": "pc-b",
+            "cpu_cores": 4,
+            "ram_gb": 8.0,
+            "inventory_hashes": set(),
+        },
+    ]
+
+    orchestrator, _, workload_registry, job_registry, attempt_registry = _make_cluster_orchestrator(
+        workers, mock_handler=mock_handler
+    )
+
+    # Submit 2-chunk job with selected_worker_ids=["pc-a", "pc-b"]
+    await orchestrator.submit_job(
+        [spec_0, spec_1],
+        execution_shape=ExecutionShape.TASK_SPLIT,
+        worker_count=2,
+    )
+
+    # Wait until both chunks are placed
+    for _ in range(100):
+        rec_0 = workload_registry.get_workload("split-job-chunk-0")
+        rec_1 = workload_registry.get_workload("split-job-chunk-1")
+        if rec_0.placement_decision is not None and rec_1.placement_decision is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    assert rec_0.placement_decision is not None
+    assert rec_1.placement_decision is not None
+
+    # Verify that the two chunks are placed across both selected workers (pc-a and pc-b)
+    # rather than double-stacking onto the same worker.
+    placed_workers = {
+        rec_0.placement_decision.selected_worker_id,
+        rec_1.placement_decision.selected_worker_id,
+    }
+    assert placed_workers == {"pc-a", "pc-b"}
+    assert rec_0.placement_decision.selected_worker_id != rec_1.placement_decision.selected_worker_id
+
+    # Allow any held chunks to complete
+    chunk_0_hold.set()
+    await orchestrator.stop_queue()
+
+
+# ============================================================================
+# M2-20: Right-Sized Cluster Selection (10 Available PCs -> 2 Selected)
+# ============================================================================
+
+def test_right_sized_cluster_selection_ten_workers_two_chunks():
+    """Verify that when 10 workers are available for a 2-chunk workload,
+    ClusterSizer selects at most 2 workers in selected_worker_ids and puts
+    the remaining 8 in spare_worker_ids.
+    """
+    sizer = ClusterSizer()
+
+    profiles = [
+        _make_profile(f"pc-{i}", cpu_cores=4, ram_gb=8.0)
+        for i in range(1, 11)
+    ]
+    worker_tags = {f"pc-{i}": {"cap:python": "true"} for i in range(1, 11)}
+
+    req = SizingRequest(
+        request_id="size-test-10-to-2",
+        total_units=2,
+        unit_workload_seconds=5.0,
+        min_cpu_cores=1,
+    )
+
+    decision = sizer.size_cluster(req, profiles, worker_tags=worker_tags)
+
+    assert decision.recommended_worker_count <= 2
+    assert len(decision.selected_worker_ids) == 2
+    assert len(decision.spare_worker_ids) == 8
+    # Ensure no overlap between selected and spare
+    assert set(decision.selected_worker_ids).isdisjoint(set(decision.spare_worker_ids))
+    assert len(set(decision.selected_worker_ids) | set(decision.spare_worker_ids)) == 10
+
