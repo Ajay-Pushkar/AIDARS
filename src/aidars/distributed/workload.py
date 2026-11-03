@@ -61,7 +61,7 @@ class WorkloadOrchestrator:
         attempt_registry: Optional[AttemptRegistry] = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         max_dispatch_tasks: int = 16,
-        execution_poll_interval_seconds: float = 1.0,
+        execution_poll_interval_seconds: float = 0.2,
     ) -> None:
         self.registry = registry
         self.workload_registry = workload_registry
@@ -574,7 +574,7 @@ class WorkloadOrchestrator:
             else:
                 active_count = sum(
                     1 for record in self.workload_registry.list_workloads()
-                    if record.state in (WorkloadState.PLACED, WorkloadState.EXECUTING)
+                    if (record.state == WorkloadState.PLACED or (record.state == WorkloadState.EXECUTING and getattr(self.registry.get_worker(worker_id), "status", None) == WorkerStatus.OFFLINE))
                     and record.placement_decision is not None
                     and record.placement_decision.selected_worker_id == info.worker_id
                 )
@@ -1104,6 +1104,7 @@ class WorkloadOrchestrator:
                     if attempt_id:
                         self.attempt_registry.mark_succeeded(attempt_id, result)
 
+
                     if result.checkpoint_hash:
                         spec.input_asset_hashes.add(result.checkpoint_hash)
                         spec.parameters["resume_from_checkpoint"] = result.checkpoint_hash
@@ -1119,8 +1120,31 @@ class WorkloadOrchestrator:
                     self.workload_registry.set_result(workload_id, result)
                     self.workload_registry.update_state(workload_id, WorkloadState.COMPLETED)
                     self._record_artifacts(spec, result)
+                    if attempt_id and self.attempt_registry:
+                        other_attempts = [
+                            a for a in self.attempt_registry.list_attempts_for_workload(workload_id)
+                            if a.attempt_id != attempt_id and a.status in (AttemptStatus.ASSIGNED, AttemptStatus.RUNNING)
+                        ]
+                        for oa in other_attempts:
+                            if oa.worker_id:
+                                ow = self.registry.get_worker(oa.worker_id)
+                                if ow:
+                                    encoded_id = quote(oa.attempt_id, safe="")
+                                    asyncio.create_task(
+                                        client.post(
+                                            f"{ow.endpoint_url}/api/v1/executions/{encoded_id}/cancel",
+                                            headers=self._worker_control_headers(),
+                                            timeout=5.0,
+                                        )
+                                    )
+                                self.attempt_registry.mark_failed(
+                                    oa.attempt_id, FailureCategory.EXECUTION_FAILURE, "Superseded by primary completion", None
+                                )
+                    if spec.job_id and decision:
+                        asyncio.create_task(self._maybe_speculative_steal_straggler(decision.selected_worker_id, spec.job_id))
                     if attempt_id:
                         self.attempt_registry.mark_succeeded(attempt_id, result)
+
                     return
 
                 # Failed result with an explicit, worker-reported outcome.
@@ -1371,6 +1395,124 @@ class WorkloadOrchestrator:
             sizes=result.output_asset_sizes,
         )
 
+    async def _maybe_speculative_steal_straggler(self, idle_worker_id: str, job_id: str) -> None:
+        """Fix #9: General N-worker speculative straggler work-stealing."""
+        if not self.job_registry or not self.attempt_registry:
+            return
+        idle_worker = self.registry.get_worker(idle_worker_id)
+        if not idle_worker or not idle_worker.is_healthy or idle_worker.status != WorkerStatus.ACTIVE:
+            return
+        running_on_idle = self.attempt_registry.list_running_attempts_for_worker(idle_worker_id)
+        if len(running_on_idle) > 0:
+            return
+
+        job = self.job_registry.get_job(job_id)
+        if not job or not job.workload_ids:
+            return
+
+        straggler_workload_id = None
+        for wid in job.workload_ids:
+            rec = self.workload_registry.get_workload(wid)
+            if rec and rec.state == WorkloadState.EXECUTING:
+                attempts = self.attempt_registry.list_attempts_for_workload(wid)
+                active_attempts = [a for a in attempts if a.status in (AttemptStatus.ASSIGNED, AttemptStatus.RUNNING)]
+                if len(active_attempts) == 1 and active_attempts[0].worker_id != idle_worker_id:
+                    if not getattr(rec, "_speculative_cloned", False):
+                        straggler_workload_id = wid
+                        rec._speculative_cloned = True
+                        break
+
+        if not straggler_workload_id:
+            return
+
+        logger.info(
+            "Speculative work-stealing: dispatching clone of %s onto idle worker %s",
+            straggler_workload_id, idle_worker_id,
+        )
+        asyncio.create_task(self._execute_speculative_attempt(straggler_workload_id, idle_worker_id))
+
+    async def _execute_speculative_attempt(self, workload_id: str, target_worker_id: str) -> None:
+        rec = self.workload_registry.get_workload(workload_id)
+        if not rec or rec.state != WorkloadState.EXECUTING:
+            return
+        worker_info = self.registry.get_worker(target_worker_id)
+        if not worker_info:
+            return
+        spec = rec.spec
+        decision = PlacementDecision(
+            workload_id=workload_id,
+            selected_worker_id=target_worker_id,
+            placement_score=1.0,
+            score_breakdown={"compute": 1.0, "speculative": 1.0},
+            missing_assets_on_worker=spec.input_asset_hashes - worker_info.inventory_hashes,
+            execution_tier="lan",
+            decision_timestamp_utc=time.time(),
+        )
+        attempt = self.attempt_registry.create_attempt(workload_id, placement_decision=decision)
+        attempt_id = attempt.attempt_id
+        self.attempt_registry.mark_assigned(attempt_id, target_worker_id)
+        self.attempt_registry.mark_running(attempt_id)
+
+        client = self._get_http_client()
+        try:
+            result = await self._submit_and_await(
+                client, worker_info, attempt_id, spec, execution_context=None,
+            )
+            if result.success:
+                with self.workload_registry._lock:
+                    cur = self.workload_registry.get_workload(workload_id)
+                    if cur and cur.state == WorkloadState.EXECUTING:
+                        self.workload_registry.set_result(workload_id, result)
+                        self.workload_registry.update_state(workload_id, WorkloadState.COMPLETED)
+                        self._record_artifacts(spec, result)
+                    if attempt_id and self.attempt_registry:
+                        other_attempts = [
+                            a for a in self.attempt_registry.list_attempts_for_workload(workload_id)
+                            if a.attempt_id != attempt_id and a.status in (AttemptStatus.ASSIGNED, AttemptStatus.RUNNING)
+                        ]
+                        for oa in other_attempts:
+                            if oa.worker_id:
+                                ow = self.registry.get_worker(oa.worker_id)
+                                if ow:
+                                    encoded_id = quote(oa.attempt_id, safe="")
+                                    asyncio.create_task(
+                                        client.post(
+                                            f"{ow.endpoint_url}/api/v1/executions/{encoded_id}/cancel",
+                                            headers=self._worker_control_headers(),
+                                            timeout=5.0,
+                                        )
+                                    )
+                                self.attempt_registry.mark_failed(
+                                    oa.attempt_id, FailureCategory.EXECUTION_FAILURE, "Superseded by primary completion", None
+                                )
+                    if spec.job_id and decision:
+                        asyncio.create_task(self._maybe_speculative_steal_straggler(decision.selected_worker_id, spec.job_id))
+                        self.attempt_registry.mark_succeeded(attempt_id, result)
+
+                        other_attempts = [
+                            a for a in self.attempt_registry.list_attempts_for_workload(workload_id)
+                            if a.attempt_id != attempt_id and a.status in (AttemptStatus.ASSIGNED, AttemptStatus.RUNNING)
+                        ]
+                        for oa in other_attempts:
+                            if oa.worker_id:
+                                other_worker = self.registry.get_worker(oa.worker_id)
+                                if other_worker:
+                                    encoded_id = quote(oa.attempt_id, safe="")
+                                    asyncio.create_task(
+                                        client.post(
+                                            f"{other_worker.endpoint_url}/api/v1/executions/{encoded_id}/cancel",
+                                            headers=self._worker_control_headers(),
+                                            timeout=5.0,
+                                        )
+                                    )
+                                self.attempt_registry.mark_failed(
+                                    oa.attempt_id, FailureCategory.EXECUTION_FAILURE, "Superseded by speculative completion", None
+                                )
+            else:
+                self.attempt_registry.mark_failed(attempt_id, result.failure_category, result.error_message, result)
+        except Exception as exc:
+            self.attempt_registry.mark_failed(attempt_id, FailureCategory.EXECUTION_FAILURE, str(exc), None)
+
     async def drain_worker(self, worker_id: str) -> None:
         """Recover ordinary work and whole execution groups using existing checkpoints.
 
@@ -1411,7 +1553,7 @@ class WorkloadOrchestrator:
         with self.workload_registry._lock:
             active_workloads = [
                 wid for wid, record in self.workload_registry._workloads.items()
-                if record.state in (WorkloadState.PLACED, WorkloadState.EXECUTING)
+                if (record.state == WorkloadState.PLACED or (record.state == WorkloadState.EXECUTING and getattr(self.registry.get_worker(worker_id), "status", None) == WorkerStatus.OFFLINE))
                 and record.placement_decision is not None
                 and record.placement_decision.selected_worker_id == worker_id
                 and wid not in group_workload_ids

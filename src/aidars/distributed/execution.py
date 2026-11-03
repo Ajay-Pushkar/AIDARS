@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import time
 from typing import Dict, Optional, Set
 import re
@@ -17,7 +18,7 @@ _SAFE_WORKLOAD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:#-]{0,127}$")
 from aidars.distributed.cas_adapter import LocalCASAdapter
 from aidars.distributed.checkpoint import CURRENT_CHECKPOINT_FORMAT_VERSION
 from aidars.distributed.models import FailureCategory, RuntimeExecutionContext, WorkloadExecutionResult, WorkloadSpec
-from aidars.distributed.runtime import RuntimeAdapter
+from aidars.distributed.runtime import RuntimeAdapter, resolve_executable_path
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,20 @@ class ExecutionManager:
         if os.path.commonpath([real_root, candidate]) != real_root or candidate == real_root:
             raise ValueError(f"Sandbox path escapes workloads_dir: {workload_id!r}")
         return candidate
+
+    def cleanup_sandbox(self, workdir: str) -> None:
+        """Safely clean up sandbox directory, clearing Windows read-only bits if encountered."""
+        def _handle_remove_readonly(func, path, exc_info):
+            try:
+                os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+                func(path)
+            except Exception:
+                pass
+        if os.path.exists(workdir):
+            try:
+                shutil.rmtree(workdir, onerror=_handle_remove_readonly)
+            except Exception as e:
+                logger.warning(f"Failed to cleanup workdir {workdir}: {e}")
 
     async def execute_workload(
         self, spec: WorkloadSpec, worker_id: str, runtime: RuntimeAdapter,
@@ -78,7 +93,7 @@ class ExecutionManager:
         # 1. Isolate Workspace
         try:
             if os.path.exists(workdir):
-                shutil.rmtree(workdir)
+                self.cleanup_sandbox(workdir)
             os.makedirs(inputs_dir)
             os.makedirs(outputs_dir)
             os.makedirs(logs_dir)
@@ -111,11 +126,53 @@ class ExecutionManager:
                     # In a real environment, hardlink or symlink to save space.
                     # Copying for Windows compatibility fallback.
                     try:
-                        os.chmod(asset_path, 0o444)
+                        if os.name != "nt":
+                            try:
+                                os.chmod(asset_path, 0o444)
+                            except OSError:
+                                pass
+                        else:
+                            try:
+                                os.chmod(asset_path, stat.S_IWRITE | stat.S_IREAD)
+                            except OSError:
+                                pass
                         os.link(asset_path, dest_path)
                     except OSError:
                         shutil.copy2(asset_path, dest_path)
-                        os.chmod(dest_path, 0o444)
+                        if os.name != "nt":
+                            try:
+                                os.chmod(dest_path, 0o444)
+                            except OSError:
+                                pass
+                        else:
+                            try:
+                                os.chmod(dest_path, stat.S_IWRITE | stat.S_IREAD)
+                            except OSError:
+                                pass
+
+                        # Fix #6: Stage .blend and .py aliases in inputs/
+                        params = spec.parameters or {}
+                        if (
+                            params.get("scene_file_hash") == h
+                            or params.get("input_file_hash") == h
+                            or params.get("scene_hash") == h
+                        ):
+                            blend_dest = os.path.join(inputs_dir, f"{h}.blend")
+                            if not os.path.exists(blend_dest):
+                                try:
+                                    os.link(dest_path, blend_dest)
+                                except OSError:
+                                    shutil.copy2(dest_path, blend_dest)
+                        if (
+                            params.get("remap_script_hash") == h
+                            or params.get("script_hash") == h
+                        ):
+                            py_dest = os.path.join(inputs_dir, f"{h}.py")
+                            if not os.path.exists(py_dest):
+                                try:
+                                    os.link(dest_path, py_dest)
+                                except OSError:
+                                    shutil.copy2(dest_path, py_dest)
                 except Exception as exc:
                     return WorkloadExecutionResult(
                         workload_id=workload_id,
@@ -285,7 +342,7 @@ class ExecutionManager:
 
         # 5. Cleanup
         try:
-            shutil.rmtree(workdir, ignore_errors=True)
+            self.cleanup_sandbox(workdir)
         except Exception as e:
             logger.warning(f"Failed to cleanup workdir {workdir}: {e}")
 
@@ -299,7 +356,10 @@ class ExecutionManager:
             staging_duration_seconds=staging_duration,
             output_ingestion_duration_seconds=output_ingestion_duration,
             verification_duration_seconds=verification_duration,
-            error_message=None if final_success else "Execution failed",
+            error_message=(
+                None if final_success else
+                ("Execution failed" + (f"\nstderr:\n{stderr_snip[-1500:]}" if stderr_snip else "") + (f"\nstdout:\n{stdout_snip[-1000:]}" if stdout_snip else ""))
+            ),
             stdout_snippet=stdout_snip,
             stderr_snippet=stderr_snip,
             was_checkpointed=was_checkpointed,

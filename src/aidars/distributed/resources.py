@@ -3,6 +3,7 @@
 Collects CPU, RAM, GPU, and VRAM metrics to build the WorkerResourceProfile.
 """
 
+import os
 import socket
 import time
 from typing import Optional, Set
@@ -39,8 +40,13 @@ class WorkerResourceMonitor:
         self, active_workload_count: int = 0, local_cached_hashes: Optional[Set[str]] = None
     ) -> WorkerResourceProfile:
         """Capture a real-time snapshot of the worker's hardware resources."""
-        cpu_cores = psutil.cpu_count(logical=True) or 1
+        cpu_cores_logical = max(1, int(psutil.cpu_count(logical=True) or os.cpu_count() or 4))
+        cpu_cores_physical = max(1, int(psutil.cpu_count(logical=False) or max(1, cpu_cores_logical // 2)))
+        cpu_cores = cpu_cores_logical
         cpu_util = psutil.cpu_percent(interval=None)
+
+        freq = psutil.cpu_freq()
+        cpu_freq_mhz = float(freq.current) if freq and getattr(freq, "current", None) and freq.current > 0 else 3000.0
 
         mem = psutil.virtual_memory()
         ram_total = mem.total
@@ -88,6 +94,9 @@ class WorkerResourceMonitor:
             endpoint_url=self.endpoint_url,
             ip_address=self.ip_address,
             cpu_cores_total=cpu_cores,
+            cpu_cores_logical=cpu_cores_logical,
+            cpu_cores_physical=cpu_cores_physical,
+            cpu_freq_mhz=cpu_freq_mhz,
             cpu_utilization_percent=cpu_util,
             ram_total_bytes=ram_total,
             ram_available_bytes=ram_avail,

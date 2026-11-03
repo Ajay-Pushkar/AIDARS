@@ -1,10 +1,134 @@
+import hashlib
 import os
+import shutil
 import uuid
 from typing import Any, List, Dict, Optional
 from aidars.adapters.base import ApplicationAdapter
 from aidars.distributed.models import WorkloadSpec, ExecutionSpec, OutputVerificationPolicy
 from aidars.adapters.blender.intelligence.scene_engine import SceneEngine
 from aidars.core.assets.manager import AssetManager
+
+BLENDER_UNIVERSAL_PREPASS_CODE = (
+    "import bpy, os, sys\n"
+    "scene = bpy.context.scene\n"
+    "total_cpus = os.cpu_count() or 4\n"
+    "cpu_threads = max(1, total_cpus - 2) if total_cpus >= 8 else max(1, total_cpus - 1)\n"
+    "scene.render.threads_mode = 'FIXED'\n"
+    "scene.render.threads = cpu_threads\n"
+    "scene.render.use_persistent_data = False\n"
+    "free_ram_gb = 8.0\n"
+    "try:\n"
+    "    import psutil\n"
+    "    free_ram_gb = psutil.virtual_memory().available / float(1024**3)\n"
+    "except Exception:\n"
+    "    pass\n"
+    "adaptive_tile = 256 if free_ram_gb < 5.0 else (512 if free_ram_gb < 12.0 else 1024)\n"
+    "if hasattr(scene, 'cycles'):\n"
+    "    if hasattr(scene.cycles, 'use_auto_tile'):\n"
+    "        scene.cycles.use_auto_tile = True\n"
+    "    if hasattr(scene.cycles, 'tile_size'):\n"
+    "        scene.cycles.tile_size = adaptive_tile\n"
+    "scene.render.use_simplify = False\n"
+    "if scene.render.resolution_x * (scene.render.resolution_percentage / 100.0) < 1024:\n"
+    "    scene.render.resolution_percentage = 100\n"
+    "if hasattr(scene.render, 'use_sequencer'):\n"
+    "    scene.render.use_sequencer = False\n"
+    "scene.render.image_settings.file_format = 'PNG'\n"
+    "scene.render.use_file_extension = True\n"
+    "if hasattr(scene, 'cycles') and hasattr(scene.cycles, 'denoising_prefilter'):\n"
+    "    scene.cycles.denoising_prefilter = 'ACCURATE'\n"
+    "if hasattr(scene, 'cycles') and hasattr(scene.cycles, 'use_light_tree'):\n"
+    "    scene.cycles.use_light_tree = False\n"
+    "if scene.world and hasattr(scene.world, 'cycles') and hasattr(scene.world.cycles, 'sampling_method'):\n"
+    "    scene.world.cycles.sampling_method = 'NONE'\n"
+    "if scene.world and scene.world.node_tree:\n"
+    "    for node in scene.world.node_tree.nodes:\n"
+    "        if node.type in ('TEX_IMAGE', 'TEX_ENVIRONMENT'):\n"
+    "            img = getattr(node, 'image', None)\n"
+    "            if img is None or img.size[0] == 0 or not getattr(img, 'has_data', True):\n"
+    "                node.mute = True\n"
+    "for obj in scene.objects:\n"
+    "    if obj.type == 'MESH':\n"
+    "        obj.visible_shadow = True\n"
+    "        obj.visible_glossy = True\n"
+    "        obj.visible_diffuse = True\n"
+    "if hasattr(scene, 'cycles'):\n"
+    "    rank = int(os.environ.get('AIDAR_SAMPLE_FUSION_RANK', -1))\n"
+    "    scene.cycles.seed = (1001 + rank * 997) if rank >= 0 else 0\n"
+    "    scene.cycles.use_animated_seed = False\n"
+    "    orig_samples = getattr(scene.cycles, 'samples', 64)\n"
+    "    scene.cycles.samples = min(orig_samples, 64) if orig_samples > 0 else 64\n"
+    "    if hasattr(scene.cycles, 'use_adaptive_sampling'):\n"
+    "        scene.cycles.use_adaptive_sampling = True\n"
+    "    if hasattr(scene.cycles, 'adaptive_threshold'):\n"
+    "        scene.cycles.adaptive_threshold = 0.02\n"
+    "if scene.camera is None:\n"
+    "    found_cam = next((s.camera for s in bpy.data.scenes if s.camera), None)\n"
+    "    if not found_cam:\n"
+    "        found_cam = next((obj for obj in bpy.data.objects if obj.type == 'CAMERA'), None)\n"
+    "    if found_cam:\n"
+    "        scene.camera = found_cam\n"
+    "    else:\n"
+    "        cam_data = bpy.data.cameras.new('FallbackCamera')\n"
+    "        cam_obj = bpy.data.objects.new('FallbackCamera', cam_data)\n"
+    "        scene.collection.objects.link(cam_obj)\n"
+    "        scene.camera = cam_obj\n"
+)
+
+
+def prepare_self_contained_blend(blend_path: str) -> str:
+    """Pack all external textures/dependencies into the .blend file so every remote worker receives 100% self-contained assets."""
+    if not blend_path or not os.path.exists(blend_path) or not os.path.isfile(blend_path):
+        return blend_path
+    try:
+        import bpy
+        bpy.ops.wm.open_mainfile(filepath=blend_path)
+        bpy.ops.file.make_paths_absolute()
+        bpy.ops.object.make_local(type='ALL')
+        bpy.ops.file.pack_all()
+        packed_path = f"{os.path.splitext(blend_path)[0]}_packed.blend"
+        bpy.ops.wm.save_as_mainfile(filepath=packed_path)
+        return packed_path
+    except Exception:
+        pass
+
+    try:
+        blender_bin = os.environ.get("AIDAR_BLENDER_EXECUTABLE") or shutil.which("blender")
+        if blender_bin and os.path.exists(blender_bin):
+            packed_path = f"{os.path.splitext(blend_path)[0]}_packed.blend"
+            shutil.copy2(blend_path, packed_path)
+            cmd = [
+                blender_bin, "-b", packed_path,
+                "--python-expr",
+                "import bpy; bpy.ops.file.make_paths_absolute(); bpy.ops.object.make_local(type='ALL'); bpy.ops.file.pack_all(); bpy.ops.wm.save_mainfile()"
+            ]
+            import subprocess
+            subprocess.run(cmd, capture_output=True, timeout=60.0)
+            if os.path.exists(packed_path) and os.path.getsize(packed_path) > 0:
+                return packed_path
+    except Exception:
+        pass
+
+    return blend_path
+
+
+def fuse_sample_buffers(buffers: List[Any], weights: Optional[List[float]] = None) -> Any:
+    """Cooperative N-PC Monte Carlo Sample Fusion. Fuses float32 image buffers weighted by throughput."""
+    if not buffers:
+        return None
+    try:
+        import numpy as np
+        if weights is None or len(weights) != len(buffers):
+            weights = [1.0 / len(buffers)] * len(buffers)
+        total_weight = sum(weights)
+        norm_weights = [w / total_weight for w in weights]
+        fused = np.zeros_like(buffers[0], dtype=np.float32)
+        for buf, w in zip(buffers, norm_weights):
+            fused += np.asarray(buf, dtype=np.float32) * float(w)
+        return fused
+    except Exception:
+        return buffers[0]
+
 
 class BlenderAdapter(ApplicationAdapter):
     """Blender adapter implementing the generic contract."""
@@ -86,16 +210,16 @@ class BlenderAdapter(ApplicationAdapter):
         # M14.6: Ensure the primary input file is hashed and included.
         # This is critical so the worker downloads the .blend file itself, not just its dependencies.
         input_file_hash = None
+        staged_blend_path = input_path
         if input_path:
-            import os
-            import hashlib
             if os.path.exists(input_path) and os.path.isfile(input_path):
+                staged_blend_path = prepare_self_contained_blend(input_path)
                 hasher = hashlib.sha256()
-                with open(input_path, "rb") as f:
+                with open(staged_blend_path, "rb") as f:
                     while chunk_data := f.read(65536):
                         hasher.update(chunk_data)
                 input_file_hash = hasher.hexdigest()
-                resolved_paths_by_hash[input_file_hash] = input_path
+                resolved_paths_by_hash[input_file_hash] = staged_blend_path
 
         input_asset_hashes = set(resolved_paths_by_hash.keys())
 
@@ -130,8 +254,62 @@ class BlenderAdapter(ApplicationAdapter):
         if remap_script_hash_param:
             input_asset_hashes.add(str(remap_script_hash_param))
 
+        total_frames = max(1, frame_end - frame_start + 1)
+        cooperative_fusion = (
+            request.get("cooperative_sample_fusion") is True
+            or (request.get("sample_fusion") is True and effective_workers > 1)
+            or (total_frames < effective_workers and effective_workers > 1 and request.get("worker_count") is not None and not adaptive)
+        )
+
         specs = []
-        for idx, chunk in enumerate(plan.chunks):
+        if cooperative_fusion:
+            for rank in range(effective_workers):
+                params = {
+                    "input_path": input_path,
+                    "frame_start": frame_start,
+                    "frame_end": frame_end,
+                    "chunk_index": rank,
+                    "sample_fusion_rank": rank,
+                    "sample_fusion_worker_count": effective_workers,
+                    "expected_output_count": total_frames,
+                    "job_frame_start": frame_start,
+                    "job_frame_end": frame_end,
+                }
+                if remap_script_hash_param:
+                    params["remap_script_hash"] = str(remap_script_hash_param)
+                if "engine" in request:
+                    params["engine"] = request["engine"]
+                if "blender_executable" in request:
+                    params["blender_executable"] = request["blender_executable"]
+
+                if input_file_hash:
+                    params["input_file_hash"] = input_file_hash
+                    params["command"] = (
+                        f"blender -b inputs/{input_file_hash} "
+                        f"-o //../outputs/frame_#### "
+                        f"-s {frame_start} -e {frame_end} -a"
+                    )
+
+                spec = WorkloadSpec(
+                    workload_id=f"{job_id}-chunk-{rank}",
+                    job_id=job_id,
+                    task_type="blender_render",
+                    input_asset_hashes=input_asset_hashes,
+                    min_cpu_cores=min_cpu_cores,
+                    min_ram_bytes=min_ram_bytes,
+                    requires_gpu=requires_gpu,
+                    min_vram_bytes=min_vram_bytes,
+                    estimated_duration_seconds=float(total_frames) * estimated_frame_duration,
+                    parameters=params,
+                )
+                if input_file_hash:
+                    try:
+                        spec.execution_spec = self.build_execution_spec(spec)
+                    except ValueError:
+                        pass
+                specs.append(spec)
+        else:
+            for idx, chunk in enumerate(plan.chunks):
             params = {
                 "input_path": input_path,
                 "frame_start": chunk.frame_start,
@@ -212,19 +390,29 @@ class BlenderAdapter(ApplicationAdapter):
             args.extend(["-E", str(engine)])
         if remap_script_hash:
             args.extend(["--python", f"inputs/{remap_script_hash}"])
+        args.extend(["--python-expr", BLENDER_UNIVERSAL_PREPASS_CODE])
         args.extend([
             "-o", "//../outputs/frame_######",
             "-s", str(start_frame),
             "-e", str(end_frame),
             "-a",
         ])
+        env = {}
+        if "sample_fusion_rank" in spec.parameters:
+            env["AIDAR_SAMPLE_FUSION_RANK"] = str(spec.parameters["sample_fusion_rank"])
+
+        timeout_seconds = (
+            float(spec.parameters.get("timeout_seconds", 14400.0))
+            if "timeout_seconds" in spec.parameters
+            else 14400.0
+        )
         return ExecutionSpec(
             command=str(blender_exec),
             executable=str(blender_exec),
             args=args,
-            env={},
+            env=env,
             cwd=None,
-            timeout_seconds=spec.estimated_duration_seconds * 3.0 if spec.estimated_duration_seconds else None,
+            timeout_seconds=timeout_seconds,
         )
 
     def describe_expected_outputs(self, workload: WorkloadSpec) -> OutputVerificationPolicy:

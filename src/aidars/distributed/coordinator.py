@@ -136,7 +136,7 @@ class CoordinatorService:
         self.penalty_decay_interval_seconds = float(penalty_decay_interval_seconds)
         self.artifact_gc_interval_seconds = float(artifact_gc_interval_seconds)
         if artifact_retention_seconds is None:
-            self.artifact_retention_seconds = float(os.environ.get("AIDAR_ARTIFACT_RETENTION_SECONDS", 0.0))
+            self.artifact_retention_seconds = float(os.environ.get("AIDAR_ARTIFACT_RETENTION_SECONDS", 3600.0))
         else:
             self.artifact_retention_seconds = float(artifact_retention_seconds)
 
@@ -511,7 +511,8 @@ class CoordinatorService:
                         # Mark worker as DRAINING in M6 registry (M7.17)
                         wid = worker_state.worker_id
                         worker_info = self.registry.get_worker(wid)
-                        if worker_info and worker_info.status == WorkerStatus.ACTIVE:
+                        running_attempts = self.attempt_registry.list_running_attempts_for_worker(wid) if self.attempt_registry else []
+                        if worker_info and worker_info.status == WorkerStatus.ACTIVE and not running_attempts and features.recent_failure_rate > 0.5:
                             logger.warning(f"Worker {wid} marked as DRAINING due to M7 behavioral risk: {behavior.state.value}")
                             self.registry.set_worker_status(wid, WorkerStatus.DRAINING)
                             # Kick off workload migration for all active workloads on this worker (M7.18)

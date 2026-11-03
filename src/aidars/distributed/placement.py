@@ -8,6 +8,24 @@ from typing import Dict, List, Optional, Set, Tuple
 from aidars.distributed.models import PlacementDecision, WorkerResourceProfile, WorkerStatus, WorkloadSpec
 
 
+def compute_worker_throughput_score(profile: WorkerResourceProfile, requires_gpu: bool = False) -> float:
+    """Universal continuous compute throughput score for any N connected PCs."""
+    cpus = float(getattr(profile, "cpu_cores_logical", 0) or getattr(profile, "cpu_cores_total", 0) or 0)
+    if cpus <= 0:
+        ram_total_gb = float(profile.ram_total_bytes or 0) / (1024**3)
+        cpus = max(2.0, min(64.0, round(ram_total_gb * 0.85))) if ram_total_gb > 0 else 4.0
+    render_threads = max(1.0, cpus - 2.0) if cpus >= 8 else max(1.0, cpus - 1.0)
+    freq_mhz = float(getattr(profile, "cpu_freq_mhz", 3000.0) or 3000.0)
+    freq_factor = max(0.6, min(1.8, freq_mhz / 3000.0))
+    ram_avail_gb = float(profile.ram_available_bytes or 0) / (1024**3)
+    ram_factor = 0.75 if ram_avail_gb < 3.0 else (1.0 + min(0.25, ram_avail_gb * 0.02))
+    cpu_score = render_threads * freq_factor * ram_factor
+    vram_gb = float(profile.vram_available_bytes or 0) / (1024**3)
+    has_gpu = bool(getattr(profile, "has_gpu", False) or getattr(profile, "gpu_available", False))
+    gpu_bonus = (8.0 + vram_gb * 1.5) if has_gpu else 0.0
+    return max(1.0, cpu_score + gpu_bonus)
+
+
 class PlacementEngine:
     """Evaluate hard eligibility first, then rank only eligible workers."""
 
@@ -263,9 +281,9 @@ class PlacementEngine:
             # Clamp normalized RAM headroom to [0.0, 2.0] (matching d_w's scale)
             # so small min_ram_bytes specs do not dominate locality and M7 risk.
             if spec.min_ram_bytes and spec.min_ram_bytes > 0:
-                m_w = min(2.0, p.ram_available_bytes / float(spec.min_ram_bytes))
+                m_w = max(0.0, min(2.0, p.ram_available_bytes / float(spec.min_ram_bytes)))
             else:
-                m_w = min(2.0, p.ram_available_bytes / float(max(1, p.ram_total_bytes)) * 2.0)
+                m_w = max(0.0, min(2.0, p.ram_available_bytes / float(max(1, p.ram_total_bytes)) * 2.0))
             # Keep the verified M6 score formula intact; generic M11 GPU
             # constraints affect hard eligibility, not the historical M6 term.
             g_w = (1.0 + p.vram_available_bytes / max(1, spec.min_vram_bytes)

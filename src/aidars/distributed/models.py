@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import time
 from enum import Enum
@@ -966,6 +967,9 @@ class WorkerResourceProfile(BaseModel):
     ip_address: str = Field(...)
 
     cpu_cores_total: int = Field(..., ge=1)
+    cpu_cores_logical: int = Field(default_factory=lambda: os.cpu_count() or 4, ge=1)
+    cpu_cores_physical: int = Field(default_factory=lambda: max(1, (os.cpu_count() or 4) // 2), ge=1)
+    cpu_freq_mhz: float = Field(default=3000.0, ge=100.0)
     cpu_utilization_percent: float = Field(..., ge=0.0, le=100.0)
 
     ram_total_bytes: int = Field(..., ge=1)
@@ -993,6 +997,10 @@ class WorkerResourceProfile(BaseModel):
         default=True,
         description="Whether this node accepts compute workload placement, or exists purely as a CAS/asset source.",
     )
+
+    @property
+    def has_gpu(self) -> bool:
+        return bool(self.gpu_available)
 
 
 # WorkerResourceProfile is declared after the wire and persistence models to

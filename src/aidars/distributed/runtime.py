@@ -18,7 +18,7 @@ from aidars.distributed.models import RuntimeExecutionContext, WorkloadSpec
 
 
 def _resolve_blender_executable(executable: str) -> str:
-    """Resolve 'blender' to AIDAR_BLENDER_EXECUTABLE or standard Windows install path."""
+    """Resolve 'blender' to AIDAR_BLENDER_EXECUTABLE or standard Windows/macOS/Linux paths."""
     env_bin = os.environ.get("AIDAR_BLENDER_EXECUTABLE", "").strip()
     if env_bin and os.path.exists(env_bin):
         return env_bin
@@ -26,17 +26,72 @@ def _resolve_blender_executable(executable: str) -> str:
     if found:
         return found
     if os.name == "nt":
+        # 1. Windows Registry check
+        try:
+            import winreg
+            for root_key, subkey in [
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\blender.exe"),
+                (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\App Paths\blender.exe"),
+                (winreg.HKEY_CLASSES_ROOT, r"blendfile\shell\open\command"),
+            ]:
+                try:
+                    with winreg.OpenKey(root_key, subkey) as key:
+                        val, _ = winreg.QueryValueEx(key, "")
+                        if val:
+                            path = val.split('"')[1] if '"' in val else val.split()[0]
+                            if os.path.exists(path):
+                                return path
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 2. Standard Program Files installs
         candidates = sorted(
             glob.glob(r"C:\Program Files\Blender Foundation\Blender*\blender.exe"),
             reverse=True,
         )
         if candidates:
             return candidates[0]
+
+        # 3. Steam installs
+        steam_patterns = [
+            r"C:\Program Files (x86)\Steam\steamapps\common\Blender\blender.exe",
+            r"C:\Program Files\Steam\steamapps\common\Blender\blender.exe",
+            r"D:\SteamLibrary\steamapps\common\Blender\blender.exe",
+            r"E:\SteamLibrary\steamapps\common\Blender\blender.exe",
+        ]
+        for sp in steam_patterns:
+            if os.path.exists(sp):
+                return sp
+
+        # 4. WinGet installs
+        local_appdata = os.environ.get("LOCALAPPDATA", "")
+        if local_appdata:
+            winget_pattern = os.path.join(
+                local_appdata, "Microsoft", "WinGet", "Packages", "**", "*blender*.exe"
+            )
+            winget_matches = sorted(glob.glob(winget_pattern, recursive=True), reverse=True)
+            for wm in winget_matches:
+                if os.path.basename(wm).lower() == "blender.exe":
+                    return wm
+    else:
+        # macOS / Linux paths
+        posix_candidates = [
+            "/Applications/Blender.app/Contents/MacOS/Blender",
+            "/snap/bin/blender",
+            "/usr/bin/blender",
+            "/usr/local/bin/blender",
+        ]
+        for cand in posix_candidates:
+            if os.path.exists(cand):
+                return cand
+
     return executable
 
 
 def _resolve_ffmpeg_executable(executable: str) -> str:
-    """Resolve 'ffmpeg' to AIDAR_FFMPEG_EXECUTABLE, PATH, or WinGet install path."""
+    """Resolve 'ffmpeg' to AIDAR_FFMPEG_EXECUTABLE, PATH, or WinGet/system paths."""
     env_bin = os.environ.get("AIDAR_FFMPEG_EXECUTABLE", "").strip()
     if env_bin and os.path.exists(env_bin):
         return env_bin
@@ -58,12 +113,36 @@ def _resolve_ffmpeg_executable(executable: str) -> str:
             ),
             r"C:\ffmpeg\bin\ffmpeg.exe",
             r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
         ]
         for pattern in search_patterns:
             matches = sorted(glob.glob(pattern, recursive=True), reverse=True)
             if matches:
                 return matches[0]
+    else:
+        posix_candidates = [
+            "/usr/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/opt/homebrew/bin/ffmpeg",
+        ]
+        for cand in posix_candidates:
+            if os.path.exists(cand):
+                return cand
+
     return executable
+
+
+def resolve_executable_path(executable: str) -> str:
+    """Universal executable auto-discovery for any connected worker node."""
+    base = os.path.basename(executable).lower()
+    if base in ("blender", "blender.exe"):
+        return _resolve_blender_executable(executable)
+    if base in ("ffmpeg", "ffmpeg.exe"):
+        return _resolve_ffmpeg_executable(executable)
+    if base in ("python", "python3", "python.exe"):
+        return sys.executable
+    found = shutil.which(executable)
+    return found or executable
 
 
 
@@ -308,9 +387,21 @@ class GenericSubprocessRuntime(RuntimeAdapter):
         process = self._process
         if process is None or process.returncode is not None:
             return
+        if os.name == "nt" and process.pid:
+            try:
+                import subprocess
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True)
+            except Exception:
+                pass
         try:
             await asyncio.wait_for(process.wait(), timeout=5.0)
         except asyncio.TimeoutError:
+            if os.name == "nt" and process.pid:
+                try:
+                    import subprocess
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True)
+                except Exception:
+                    pass
             try:
                 proc = psutil.Process(process.pid)
                 for child in proc.children(recursive=True):
@@ -331,12 +422,21 @@ class GenericSubprocessRuntime(RuntimeAdapter):
 
     def _terminate_process_tree(self):
         if self._process and self._process.returncode is None:
+            pid = self._process.pid
+            if os.name == "nt" and pid:
+                try:
+                    import subprocess
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+                except Exception:
+                    pass
             try:
-                pid = self._process.pid
                 parent = psutil.Process(pid)
                 children = parent.children(recursive=True)
                 for child in children:
-                    child.terminate()
+                    try:
+                        child.terminate()
+                    except psutil.NoSuchProcess:
+                        pass
                 parent.terminate()
             except (psutil.NoSuchProcess, ProcessLookupError):
                 pass
