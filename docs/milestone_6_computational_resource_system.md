@@ -1,7 +1,8 @@
 # Milestone 6: Adaptive Computational Resource System
 
-**Status:** Design & Validation Blueprint Frozen (Ready for Implementation)  
+**Status:** Completed, Validated & Frozen ✅  
 **Specification:** [`AIDAR_M6_Architecture_and_Validation_Spec.md`](file:///c:/AIDAR/AIDAR_M6_Architecture_and_Validation_Spec.md)  
+**Implementation Modules:** `src/aidars/distributed/` (`models.py`, `placement.py`, `resources.py`, `execution.py`, `singleflight.py`)  
 
 ---
 
