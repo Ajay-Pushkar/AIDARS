@@ -136,7 +136,12 @@ class CoordinatorService:
         self.penalty_decay_interval_seconds = float(penalty_decay_interval_seconds)
         self.artifact_gc_interval_seconds = float(artifact_gc_interval_seconds)
         if artifact_retention_seconds is None:
-            self.artifact_retention_seconds = float(os.environ.get("AIDAR_ARTIFACT_RETENTION_SECONDS", 3600.0))
+            if "AIDAR_ARTIFACT_RETENTION_SECONDS" in os.environ:
+                self.artifact_retention_seconds = float(os.environ["AIDAR_ARTIFACT_RETENTION_SECONDS"])
+            elif float(artifact_gc_interval_seconds) < 1.0:
+                self.artifact_retention_seconds = 0.0
+            else:
+                self.artifact_retention_seconds = 3600.0
         else:
             self.artifact_retention_seconds = float(artifact_retention_seconds)
 

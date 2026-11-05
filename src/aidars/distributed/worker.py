@@ -604,7 +604,13 @@ class DistributedWorker:
         # 1. Sync dependencies with SingleFlight deduplication
         transfer_start = time.time()
         if spec.input_asset_hashes:
-            sync_results = await self.sync_assets(spec.input_asset_hashes)
+            def _sync():
+                return self.sync_assets(spec.input_asset_hashes)
+
+            sync_results = await self.single_flight.run(
+                key=f"sync-{spec.workload_id}",
+                operation=_sync,
+            )
             
             transfer_duration = time.time() - transfer_start
             for h, res in sync_results.items():

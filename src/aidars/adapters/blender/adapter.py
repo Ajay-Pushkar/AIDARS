@@ -310,59 +310,59 @@ class BlenderAdapter(ApplicationAdapter):
                 specs.append(spec)
         else:
             for idx, chunk in enumerate(plan.chunks):
-            params = {
-                "input_path": input_path,
-                "frame_start": chunk.frame_start,
-                "frame_end": chunk.frame_end,
-                "chunk_index": idx,
-                # M8.6: one output file expected per frame in this chunk.
-                "expected_output_count": chunk.frame_count,
-                # M8.7: the job's overall requested range, so a
-                # frame-coverage check can be done per-chunk without
-                # needing the original request dict.
-                "job_frame_start": frame_start,
-                "job_frame_end": frame_end,
-            }
-            if remap_script_hash_param:
-                params["remap_script_hash"] = str(remap_script_hash_param)
-            if "engine" in request:
-                params["engine"] = request["engine"]
-            if "blender_executable" in request:
-                params["blender_executable"] = request["blender_executable"]
+                params = {
+                    "input_path": input_path,
+                    "frame_start": chunk.frame_start,
+                    "frame_end": chunk.frame_end,
+                    "chunk_index": idx,
+                    # M8.6: one output file expected per frame in this chunk.
+                    "expected_output_count": chunk.frame_count,
+                    # M8.7: the job's overall requested range, so a
+                    # frame-coverage check can be done per-chunk without
+                    # needing the original request dict.
+                    "job_frame_start": frame_start,
+                    "job_frame_end": frame_end,
+                }
+                if remap_script_hash_param:
+                    params["remap_script_hash"] = str(remap_script_hash_param)
+                if "engine" in request:
+                    params["engine"] = request["engine"]
+                if "blender_executable" in request:
+                    params["blender_executable"] = request["blender_executable"]
 
-            if "min_ram_bytes" not in request and total_asset_bytes == 0:
-                params["resource_requirement_confidence"] = "unverified"
-                params["ram_requirement_state"] = "undeclared_unconstrained"
+                if "min_ram_bytes" not in request and total_asset_bytes == 0:
+                    params["resource_requirement_confidence"] = "unverified"
+                    params["ram_requirement_state"] = "undeclared_unconstrained"
 
-            # Store hash for execution spec builder
-            if input_file_hash:
-                params["input_file_hash"] = input_file_hash
-                # M14.6: Populate the 'command' parameter for GenericSubprocessRuntime.
-                # Kept for backward compatibility until M19.3 migrates to ExecutionSpec.
-                params["command"] = (
-                    f"blender -b inputs/{input_file_hash} "
-                    f"-o //../outputs/frame_#### "
-                    f"-s {chunk.frame_start} -e {chunk.frame_end} -a"
+                # Store hash for execution spec builder
+                if input_file_hash:
+                    params["input_file_hash"] = input_file_hash
+                    # M14.6: Populate the 'command' parameter for GenericSubprocessRuntime.
+                    # Kept for backward compatibility until M19.3 migrates to ExecutionSpec.
+                    params["command"] = (
+                        f"blender -b inputs/{input_file_hash} "
+                        f"-o //../outputs/frame_#### "
+                        f"-s {chunk.frame_start} -e {chunk.frame_end} -a"
+                    )
+
+                spec = WorkloadSpec(
+                    workload_id=f"{job_id}-chunk-{idx}",
+                    job_id=job_id,
+                    task_type="blender_render",
+                    input_asset_hashes=input_asset_hashes,
+                    min_cpu_cores=min_cpu_cores,
+                    min_ram_bytes=min_ram_bytes,
+                    requires_gpu=requires_gpu,
+                    min_vram_bytes=min_vram_bytes,
+                    estimated_duration_seconds=float(chunk.frame_count) * estimated_frame_duration,
+                    parameters=params,
                 )
-
-            spec = WorkloadSpec(
-                workload_id=f"{job_id}-chunk-{idx}",
-                job_id=job_id,
-                task_type="blender_render",
-                input_asset_hashes=input_asset_hashes,
-                min_cpu_cores=min_cpu_cores,
-                min_ram_bytes=min_ram_bytes,
-                requires_gpu=requires_gpu,
-                min_vram_bytes=min_vram_bytes,
-                estimated_duration_seconds=float(chunk.frame_count) * estimated_frame_duration,
-                parameters=params,
-            )
-            if input_file_hash:
-                try:
-                    spec.execution_spec = self.build_execution_spec(spec)
-                except ValueError:
-                    pass
-            specs.append(spec)
+                if input_file_hash:
+                    try:
+                        spec.execution_spec = self.build_execution_spec(spec)
+                    except ValueError:
+                        pass
+                specs.append(spec)
 
         return specs
         

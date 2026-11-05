@@ -574,7 +574,7 @@ class WorkloadOrchestrator:
             else:
                 active_count = sum(
                     1 for record in self.workload_registry.list_workloads()
-                    if (record.state == WorkloadState.PLACED or (record.state == WorkloadState.EXECUTING and getattr(self.registry.get_worker(worker_id), "status", None) == WorkerStatus.OFFLINE))
+                    if record.state in (WorkloadState.PLACED, WorkloadState.EXECUTING)
                     and record.placement_decision is not None
                     and record.placement_decision.selected_worker_id == info.worker_id
                 )
