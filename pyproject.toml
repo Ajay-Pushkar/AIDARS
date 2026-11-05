@@ -27,6 +27,7 @@ where = ["src"]
 aidars-scene = "aidars.adapters.blender.intelligence.cli:main"
 aidars-coordinator = "aidars.distributed.cli:run_coordinator"
 aidars-worker = "aidars.distributed.cli:run_worker"
+aidars-ml-run = "aidars.cli.ml_run:main"
 
 [project.optional-dependencies]
 gpu = [
